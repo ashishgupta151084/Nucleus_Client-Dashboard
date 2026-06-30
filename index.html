@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SIIPL Audit Dashboard</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-is@18/umd/react-is.production.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+</style>
+<script>
+  window.addEventListener('error', function(e) {
+    const root = document.getElementById('root');
+    if (root && !root.hasChildNodes()) {
+      root.innerHTML = '<div style="padding:40px;font-family:sans-serif;max-width:600px;margin:60px auto;background:#FEF2F2;border:1px solid #FECACA;border-radius:12px;color:#991B1B;">' +
+        '<h2 style="margin:0 0 12px;">Dashboard failed to load</h2>' +
+        '<p style="margin:0 0 8px;">Error: ' + (e.message || 'Unknown error') + '</p>' +
+        '<p style="font-size:13px;color:#7F1D1D;">This usually means a required script (React, Recharts, or Babel) failed to load from the CDN. Check your internet connection and try refreshing.</p>' +
+        '</div>';
+    }
+  });
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/plain" id="app-source">
+const { useState } = React;
+const { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Cell } = Recharts;
+
+
+const D = {
+  fy: "2024-25", phase: "Phase 1",
+  units: ["Hinjewadi","Sanand","Rudrapur","Chakan","Gurugram"],
+  overview: { total:285, totalRepeatedObs:61, totalOpenPriorObs:70 },
+  keyInstances: [
+    { metric:"67",  label:"Hinjewadi had highest observations (67), followed by Sanand (62)." },
+    { metric:"6",   label:"Sanand had most critical observations — 6 of 20 total critical across all units." },
+    { metric:"22",  label:"Hinjewadi had most repeated observations (22 — 36% of 61 total)." },
+    { metric:"41",  label:"Gurugram had most open prior-year observations (41 — 58.5% of 70 total)." },
+    { metric:"49",  label:"Sanand had highest limitations (49, 36 in HR alone), followed by Gurugram (16)." },
+    { metric:"285", label:"Total observations across 5 units in Phase 1, FY 2024-25." },
+  ],
+  unitData: {
+    Hinjewadi: { critical:4,  high:21, medium:35, low:7,  total:67, avgMonthlySales:14,    repeatedObs:22, openPriorObs:14, limitations:13, weakestArea:"Inventory Mgmt (13)", highestCriticalArea:"Inventory Mgmt (2)",
+      areas:{ Sales:{c:1,h:5,m:2,l:2,t:10}, "Repairs & Maint.":{c:0,h:4,m:3,l:1,t:8}, Logistics:{c:0,h:0,m:7,l:1,t:8}, "Quality Mgmt":{c:0,h:4,m:6,l:0,t:10}, "Inventory Mgmt":{c:2,h:2,m:8,l:1,t:13}, Procurement:{c:0,h:3,m:7,l:1,t:11}, "Human Resource":{c:1,h:3,m:2,l:1,t:7} } },
+    Sanand:    { critical:6,  high:14, medium:30, low:12, total:62, avgMonthlySales:6.8,   repeatedObs:14, openPriorObs:27, limitations:50, weakestArea:"Procurement (15)",    highestCriticalArea:"Inventory Mgmt (3)",
+      areas:{ "Inventory Mgmt":{c:3,h:0,m:8,l:2,t:13}, "Repairs & Maint.":{c:1,h:2,m:3,l:1,t:8}, "Human Resource":{c:1,h:1,m:0,l:0,t:2}, Sales:{c:1,h:3,m:4,l:2,t:11}, Procurement:{c:0,h:4,m:5,l:6,t:15}, "Quality Mgmt":{c:0,h:3,m:6,l:0,t:9}, Logistics:{c:0,h:1,m:4,l:1,t:6} } },
+    Rudrapur:  { critical:13, high:15, medium:23, low:8,  total:59, avgMonthlySales:3.22,  repeatedObs:7,  openPriorObs:6,  limitations:12, weakestArea:"Procurement (11)",    highestCriticalArea:"Inventory Mgmt (2)",
+      areas:{ "Inventory Mgmt":{c:2,h:2,m:4,l:1,t:9}, "Human Resource":{c:1,h:1,m:2,l:0,t:4}, "Quality Mgmt":{c:0,h:3,m:1,l:3,t:7}, "Repairs & Maint.":{c:0,h:3,m:2,l:1,t:6}, Procurement:{c:0,h:2,m:7,l:2,t:11}, Sales:{c:0,h:2,m:5,l:1,t:8}, Logistics:{c:0,h:1,m:3,l:0,t:4} } },
+    Chakan:    { critical:3,  high:15, medium:32, low:5,  total:55, avgMonthlySales:15.75, repeatedObs:16, openPriorObs:17, limitations:5,  weakestArea:"Procurement (11)",    highestCriticalArea:"Inventory Mgmt (2)",
+      areas:{ "Inventory Mgmt":{c:2,h:1,m:6,l:1,t:10}, "Human Resource":{c:1,h:1,m:4,l:0,t:6}, Sales:{c:0,h:6,m:2,l:0,t:8}, "Repairs & Maint.":{c:0,h:4,m:2,l:0,t:6}, Procurement:{c:0,h:2,m:8,l:1,t:11}, "Quality Mgmt":{c:0,h:1,m:4,l:1,t:6}, Logistics:{c:0,h:0,m:6,l:2,t:8} } },
+    Gurugram:  { critical:4,  high:15, medium:25, low:7,  total:51, avgMonthlySales:4.65,  repeatedObs:19, openPriorObs:41, limitations:16, weakestArea:"Inventory Mgmt (13)", highestCriticalArea:"Inventory Mgmt (3)",
+      areas:{ "Inventory Mgmt":{c:3,h:4,m:5,l:1,t:13}, "Human Resource":{c:1,h:2,m:4,l:1,t:8}, Procurement:{c:0,h:2,m:6,l:0,t:8}, Sales:{c:0,h:2,m:3,l:2,t:7}, "Quality Mgmt":{c:0,h:2,m:2,l:0,t:4}, Logistics:{c:1,h:3,m:2,l:0,t:6}, "Repairs & Maint.":{c:0,h:2,m:2,l:1,t:5} } },
+  },
+  financialImpact: {
+    potentialRevenueSavings: { total:27.18,   byUnit:{ Hinjewadi:24.34, Sanand:0.23,   Chakan:2.61,   Gurugram:0,     Rudrapur:0 } },
+    potentialFutureLosses:   { total:193.86,  byUnit:{ Hinjewadi:0,     Sanand:85.51,  Chakan:4.19,   Gurugram:1.5,   Rudrapur:102.65 } },
+    missedRevenueSavings:    { total:1927.86, byUnit:{ Hinjewadi:1418.10,Sanand:142.07, Chakan:165.11, Gurugram:21.88, Rudrapur:180.71 } },
+    alreadyIncurredLosses:   { total:34.00,   byUnit:{ Hinjewadi:30.08, Sanand:1.06,   Chakan:0.03,   Gurugram:1.20,  Rudrapur:1.63 } },
+  },
+  commonObservations: [
+    { process:"Inventory",       obs:"Standard vs Actual Consumption not monitored / BOM inadequate",    risk:"Critical", units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Inventory",       obs:"Min-Max inventory levels not defined / not followed",               risk:"High",     units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Inventory",       obs:"Multiple infrastructural issues with store",                        risk:"Medium",   units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Inventory",       obs:"No monitoring of goods in transit",                                 risk:"Medium",   units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Inventory",       obs:"No action taken for non-moving / obsolete inventory",              risk:"Critical", units:["Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Inventory",       obs:"Wastage (cuttings) management not done properly",                  risk:"Medium",   units:["Sanand","Chakan","Hinjewadi"] },
+    { process:"Inventory",       obs:"No proper tagging / labelling in warehouse",                        risk:"Medium",   units:["Sanand","Chakan","Hinjewadi"] },
+    { process:"Inventory",       obs:"No reconciliation between Excel stock records and CMC",            risk:"High",     units:["Chakan","Hinjewadi"] },
+    { process:"Human Resource",  obs:"Non-compliance with applicable laws",                              risk:"Critical", units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Human Resource",  obs:"Failure to adhere to PPE guidelines",                             risk:"Medium",   units:["Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Human Resource",  obs:"Absence of agreement with contractor & contractor license",       risk:"High",     units:["Chakan","Hinjewadi"] },
+    { process:"Human Resource",  obs:"Overtime done by workers for continuous 23+ days",                risk:"High",     units:["Chakan","Hinjewadi"] },
+    { process:"Quality",         obs:"No action for repetitive customer complaints / no RCA",           risk:"High",     units:["Sanand","Chakan","Hinjewadi"] },
+    { process:"Quality",         obs:"Non-performance of first piece inspection",                        risk:"Medium",   units:["Sanand","Chakan","Hinjewadi"] },
+    { process:"Quality",         obs:"No analysis of rejection/rework — overtime vs normal time",       risk:"Medium",   units:["Sanand","Chakan","Hinjewadi"] },
+    { process:"Sales",           obs:"Delay in generation of IRN for credit notes",                     risk:"Medium",   units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Sales",           obs:"Discrepancies in planned vs actual dispatch / sales",             risk:"High",     units:["Sanand","Chakan","Hinjewadi"] },
+    { process:"Sales",           obs:"No scrap policy / improper wastage management",                   risk:"Low",      units:["Chakan","Hinjewadi"] },
+    { process:"Logistics",       obs:"No safety checklist for security personnel",                      risk:"Medium",   units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Logistics",       obs:"Lack of controls in selection of transporters",                   risk:"Medium",   units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Logistics",       obs:"No due diligence of transporter",                                 risk:"Medium",   units:["Sanand","Chakan","Hinjewadi"] },
+    { process:"Logistics",       obs:"No agreement with transporter",                                   risk:"Medium",   units:["Chakan","Hinjewadi"] },
+    { process:"Procurement",     obs:"Purchases from unapproved vendors",                               risk:"High",     units:["Gurugram","Sanand","Chakan","Hinjewadi","Rudrapur"] },
+    { process:"Procurement",     obs:"Improper accounting of purchase transactions",                    risk:"High",     units:["Gurugram","Sanand","Chakan","Hinjewadi"] },
+    { process:"Procurement",     obs:"Lack of maintenance of production halt records",                  risk:"Medium",   units:["Gurugram","Sanand","Hinjewadi","Rudrapur"] },
+    { process:"Procurement",     obs:"No agreement with suppliers",                                     risk:"Medium",   units:["Gurugram","Sanand","Hinjewadi","Rudrapur"] },
+    { process:"Procurement",     obs:"Inconsistent rate with different suppliers for same material",    risk:"Medium",   units:["Sanand","Rudrapur"] },
+    { process:"Repairs & Maint.",obs:"No root cause analysis for recurring breakdowns",                 risk:"High",     units:["Chakan","Hinjewadi"] },
+  ],
+  repeatedObsByArea: {
+    "Inventory Mgmt":   { Hinjewadi:6, Gurugram:5, Chakan:4, Sanand:6, Rudrapur:3 },
+    "Logistics":        { Hinjewadi:3, Gurugram:5, Chakan:3, Sanand:1, Rudrapur:1 },
+    "Repairs & Maint.": { Hinjewadi:5, Gurugram:2, Chakan:1, Sanand:1, Rudrapur:0 },
+    "Human Resource":   { Hinjewadi:2, Gurugram:3, Chakan:3, Sanand:1, Rudrapur:0 },
+    "Sales":            { Hinjewadi:2, Gurugram:0, Chakan:3, Sanand:2, Rudrapur:1 },
+    "Quality Mgmt":     { Hinjewadi:3, Gurugram:1, Chakan:1, Sanand:2, Rudrapur:1 },
+    "Procurement":      { Hinjewadi:1, Gurugram:3, Chakan:1, Sanand:1, Rudrapur:1 },
+  },
+  priorOpenByArea: {
+    "Human Resource":   { Gurugram:10, Sanand:10, Chakan:3, Hinjewadi:4, Rudrapur:0 },
+    "Inventory Mgmt":   { Gurugram:9,  Sanand:6,  Chakan:5, Hinjewadi:1, Rudrapur:2 },
+    "Logistics":        { Gurugram:8,  Sanand:4,  Chakan:3, Hinjewadi:2, Rudrapur:2 },
+    "Procurement":      { Gurugram:7,  Sanand:1,  Chakan:1, Hinjewadi:1, Rudrapur:1 },
+    "Repairs & Maint.": { Gurugram:2,  Sanand:2,  Chakan:2, Hinjewadi:3, Rudrapur:0 },
+    "Sales":            { Gurugram:4,  Sanand:2,  Chakan:2, Hinjewadi:1, Rudrapur:0 },
+    "Quality Mgmt":     { Gurugram:1,  Sanand:2,  Chakan:1, Hinjewadi:2, Rudrapur:1 },
+  },
+  limitations: { Sanand:50, Gurugram:16, Hinjewadi:13, Rudrapur:12, Chakan:5 },
+};
+
+// ── Colours ───────────────────────────────────────────────────────────────────
+const RC = {
+  Critical:{ fg:"#991B1B", bg:"#FEF2F2", border:"#FECACA", dot:"#EF4444" },
+  High:    { fg:"#9A3412", bg:"#FFF7ED", border:"#FED7AA", dot:"#F97316" },
+  Medium:  { fg:"#854D0E", bg:"#FEFCE8", border:"#FEF08A", dot:"#F59E0B" },
+  Low:     { fg:"#166534", bg:"#F0FDF4", border:"#BBF7D0", dot:"#22C55E" },
+};
+const UC = { Hinjewadi:"#3B82F6", Sanand:"#F97316", Rudrapur:"#8B5CF6", Chakan:"#10B981", Gurugram:"#EC4899" };
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+const Chip = ({ level }) => {
+  const c = RC[level] || RC.Low;
+  return (
+    <span style={{ display:"inline-block", background:c.bg, color:c.fg, border:`1px solid ${c.border}`,
+      borderRadius:4, padding:"2px 8px", fontSize:11, fontWeight:700, whiteSpace:"nowrap", lineHeight:"18px" }}>
+      {level}
+    </span>
+  );
+};
+
+function Stack({ c=0, h=0, m=0, l=0, t, height=7 }) {
+  if (!t) return <div style={{ height, background:"#E5E7EB", borderRadius:3 }} />;
+  return (
+    <div style={{ display:"flex", height, borderRadius:3, overflow:"hidden", gap:1 }}>
+      {[{v:c,col:"#EF4444"},{v:h,col:"#F97316"},{v:m,col:"#F59E0B"},{v:l,col:"#22C55E"}]
+        .map((s,i) => s.v > 0 && <div key={i} style={{ flex:s.v, background:s.col }} />)}
+    </div>
+  );
+}
+
+// Highlight best/worst in a column
+function hlCell(key, val, badHigh) {
+  const vals = D.units.map(u => D.unitData[u][key]).filter(v => typeof v === "number");
+  const max = Math.max(...vals), min = Math.min(...vals);
+  if (badHigh  && val === max) return { background:"#FEF2F2", color:"#DC2626", fontWeight:800 };
+  if (badHigh  && val === min) return { background:"#F0FDF4", color:"#16A34A", fontWeight:800 };
+  if (!badHigh && val === max) return { background:"#F0FDF4", color:"#16A34A", fontWeight:800 };
+  return {};
+}
+
+// Section wrapper
+const Section = ({ title, sub, accent="#1D4ED8", children }) => (
+  <div style={{ background:"#fff", borderRadius:12, border:"1px solid #E5E7EB",
+    padding:"24px 28px", marginBottom:20 }}>
+    <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:20,
+      paddingBottom:16, borderBottom:"1px solid #F1F5F9" }}>
+      <div style={{ width:4, minHeight:40, background:accent, borderRadius:2, flexShrink:0, marginTop:2 }} />
+      <div>
+        <div style={{ fontSize:16, fontWeight:800, color:"#0F172A", lineHeight:1.3 }}>{title}</div>
+        {sub && <div style={{ fontSize:12, color:"#6B7280", marginTop:4 }}>{sub}</div>}
+      </div>
+    </div>
+    {children}
+  </div>
+);
+
+// Shared table styles
+const TH = (align="center") => ({
+  padding:"9px 12px", textAlign:align, color:"#6B7280", fontSize:11,
+  fontWeight:700, letterSpacing:.4, borderBottom:"2px solid #E5E7EB",
+  background:"#F8FAFC", whiteSpace:"nowrap"
+});
+const TD = (align="center", extra={}) => ({
+  padding:"9px 12px", textAlign:align, fontSize:13, ...extra
+});
+
+// ── OVERVIEW ──────────────────────────────────────────────────────────────────
+function Overview() {
+  const chartData = D.units.map(u => ({
+    name:u,
+    Observations: D.unitData[u].total,
+    "Avg Sales (Cr)": D.unitData[u].avgMonthlySales,
+  }));
+  return (
+    <Section title="Overview" sub={`Phase 1 · FY ${D.fy} · Units: ${D.units.join(", ")}`} accent="#1D4ED8">
+      {/* KPI row */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:28 }}>
+        {[
+          { label:"Total Observations",    val:D.overview.total,            col:"#1D4ED8", bg:"#EFF6FF" },
+          { label:"Repeated Observations", val:D.overview.totalRepeatedObs, col:"#D97706", bg:"#FFFBEB" },
+          { label:"Prior Year Still Open", val:D.overview.totalOpenPriorObs,col:"#7C3AED", bg:"#F5F3FF" },
+        ].map(k => (
+          <div key={k.label} style={{ background:k.bg, borderRadius:10, padding:"18px 20px" }}>
+            <div style={{ fontSize:34, fontWeight:900, color:k.col, lineHeight:1 }}>{k.val}</div>
+            <div style={{ fontSize:12, color:"#6B7280", marginTop:6, fontWeight:600 }}>{k.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Unit risk summary table */}
+      <div style={{ marginBottom:28, overflowX:"auto" }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr>
+              <th style={TH("left")}>UNIT</th>
+              <th style={TH()}>CRITICAL</th>
+              <th style={TH()}>HIGH</th>
+              <th style={TH()}>MEDIUM</th>
+              <th style={TH()}>LOW</th>
+              <th style={TH()}>TOTAL</th>
+              <th style={{ ...TH(), width:120 }}>SPLIT</th>
+            </tr>
+          </thead>
+          <tbody>
+            {D.units.map((u, i) => {
+              const ud = D.unitData[u];
+              return (
+                <tr key={u} style={{ background:i%2===0?"#fff":"#FAFAFA", borderBottom:"1px solid #F3F4F6" }}>
+                  <td style={TD("left", { fontWeight:700, color:"#0F172A" })}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                      <div style={{ width:8, height:8, borderRadius:"50%", background:UC[u], flexShrink:0 }} />
+                      {u}
+                    </div>
+                  </td>
+                  {["critical","high","medium","low"].map(k => {
+                    const cap = k[0].toUpperCase()+k.slice(1);
+                    const v = ud[k];
+                    return (
+                      <td key={k} style={TD()}>
+                        {v > 0
+                          ? <span style={{ background:RC[cap].bg, color:RC[cap].fg, borderRadius:5,
+                              padding:"2px 10px", fontWeight:700, fontSize:12 }}>{v}</span>
+                          : <span style={{ color:"#D1D5DB" }}>—</span>}
+                      </td>
+                    );
+                  })}
+                  <td style={TD("center", { fontWeight:800, color:"#0F172A" })}>{ud.total}</td>
+                  <td style={{ padding:"9px 12px" }}>
+                    <Stack c={ud.critical} h={ud.high} m={ud.medium} l={ud.low} t={ud.total} height={8} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Chart */}
+      <div style={{ fontSize:13, fontWeight:700, color:"#374151", marginBottom:10 }}>
+        Observations vs Avg Monthly Sales (₹ Cr) by Unit
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <BarChart data={chartData} margin={{ top:4, right:16, bottom:4, left:0 }} barGap={4}>
+          <XAxis dataKey="name" tick={{ fontSize:12, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <YAxis yAxisId="l" tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <YAxis yAxisId="r" orientation="right" tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <Tooltip contentStyle={{ borderRadius:8, border:"1px solid #E5E7EB", fontSize:12 }} />
+          <Legend wrapperStyle={{ fontSize:12 }} />
+          <Bar yAxisId="l" dataKey="Observations" radius={[5,5,0,0]} maxBarSize={40}>
+            {D.units.map(u => <Cell key={u} fill={UC[u]} />)}
+          </Bar>
+          <Bar yAxisId="r" dataKey="Avg Sales (Cr)" fill="#CBD5E1" radius={[5,5,0,0]} maxBarSize={40} />
+        </BarChart>
+      </ResponsiveContainer>
+    </Section>
+  );
+}
+
+// ── KEY INSTANCES ─────────────────────────────────────────────────────────────
+function KeyInstances() {
+  return (
+    <Section title="Key Instances — Audit at a Glance" sub="Standout findings across all Phase 1 units" accent="#DC2626">
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))", gap:14 }}>
+        {D.keyInstances.map((item, i) => (
+          <div key={i} style={{ display:"flex", gap:16, alignItems:"flex-start",
+            background:"#F8FAFC", borderRadius:10, padding:"16px 18px",
+            borderLeft:"3px solid #1D4ED8" }}>
+            <div style={{ fontSize:26, fontWeight:900, color:"#1D4ED8",
+              minWidth:64, lineHeight:1.1, flexShrink:0 }}>{item.metric}</div>
+            <div style={{ fontSize:13, color:"#374151", lineHeight:1.65 }}>{item.label}</div>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+// ── FINANCIAL IMPACT ──────────────────────────────────────────────────────────
+function FinancialImpact() {
+  const fi = D.financialImpact;
+  const cats = [
+    { key:"potentialRevenueSavings", label:"Potential Revenue / Savings",  col:"#059669", bg:"#F0FDF4" },
+    { key:"potentialFutureLosses",   label:"Potential Future Losses",       col:"#D97706", bg:"#FFFBEB" },
+    { key:"missedRevenueSavings",    label:"Missed Revenue / Savings",      col:"#DC2626", bg:"#FEF2F2" },
+    { key:"alreadyIncurredLosses",   label:"Already Incurred Losses",       col:"#7C3AED", bg:"#F5F3FF" },
+  ];
+  const chartData = cats.map(cat => {
+    const row = { name: cat.label.split(" ").slice(0,2).join(" ") };
+    D.units.forEach(u => { row[u] = fi[cat.key].byUnit[u] || 0; });
+    return row;
+  });
+  return (
+    <Section title="Observations with Financial Impact" sub="All amounts in ₹ Lakhs" accent="#D97706">
+      {/* Total cards */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:14, marginBottom:24 }}>
+        {cats.map(cat => (
+          <div key={cat.key} style={{ background:cat.bg, borderRadius:10, padding:"16px 18px" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:cat.col, letterSpacing:.5, marginBottom:6 }}>
+              {cat.label.toUpperCase()}
+            </div>
+            <div style={{ fontSize:28, fontWeight:900, color:cat.col }}>
+              ₹{fi[cat.key].total.toLocaleString("en-IN")} L
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Detail table */}
+      <div style={{ overflowX:"auto", marginBottom:24 }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr>
+              <th style={TH("left")}>CATEGORY</th>
+              {D.units.map(u => <th key={u} style={TH()}>{u}</th>)}
+              <th style={TH()}>TOTAL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cats.map((cat, i) => (
+              <tr key={cat.key} style={{ background:i%2===0?"#fff":"#FAFAFA", borderBottom:"1px solid #F3F4F6" }}>
+                <td style={TD("left", { fontWeight:600, color:cat.col, fontSize:12 })}>{cat.label}</td>
+                {D.units.map(u => (
+                  <td key={u} style={TD("center", { color:"#374151" })}>
+                    {fi[cat.key].byUnit[u] ? `₹${fi[cat.key].byUnit[u].toLocaleString("en-IN")}` : "—"}
+                  </td>
+                ))}
+                <td style={TD("center", { fontWeight:800, color:cat.col })}>
+                  ₹{fi[cat.key].total.toLocaleString("en-IN")}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Chart */}
+      <div style={{ fontSize:13, fontWeight:700, color:"#374151", marginBottom:10 }}>
+        Financial Impact by Unit (₹ Lakhs)
+      </div>
+      <ResponsiveContainer width="100%" height={200}>
+        <BarChart data={chartData} margin={{ top:4, right:16, bottom:4, left:0 }}>
+          <XAxis dataKey="name" tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <Tooltip formatter={v => `₹${v} L`} contentStyle={{ borderRadius:8, border:"1px solid #E5E7EB", fontSize:12 }} />
+          <Legend wrapperStyle={{ fontSize:12 }} />
+          {D.units.map(u => <Bar key={u} dataKey={u} fill={UC[u]} stackId="a" radius={[2,2,0,0]} maxBarSize={60} />)}
+        </BarChart>
+      </ResponsiveContainer>
+    </Section>
+  );
+}
+
+// ── COMPARATIVE ANALYSIS ──────────────────────────────────────────────────────
+function Comparative() {
+  const rows = [
+    { label:"Total Observations",    key:"total",          badHigh:true  },
+    { label:"Critical",              key:"critical",       badHigh:true  },
+    { label:"High",                  key:"high",           badHigh:true  },
+    { label:"Medium",                key:"medium",         badHigh:false },
+    { label:"Low",                   key:"low",            badHigh:false },
+    { label:"Avg Monthly Sales (Cr)",key:"avgMonthlySales",badHigh:false },
+    { label:"Repeated Obs",          key:"repeatedObs",    badHigh:true  },
+    { label:"Prior Yr Open",         key:"openPriorObs",   badHigh:true  },
+    { label:"Limitations",           key:"limitations",    badHigh:true  },
+  ];
+  const chartData = D.units.map(u => ({
+    name:u,
+    Critical: D.unitData[u].critical,
+    High:     D.unitData[u].high,
+    Medium:   D.unitData[u].medium,
+    Low:      D.unitData[u].low,
+  }));
+  return (
+    <Section title="Comparative Performance Analysis" sub="Red = worst in row · Green = best in row" accent="#7C3AED">
+      <div style={{ overflowX:"auto", marginBottom:28 }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr>
+              <th style={TH("left")}>CATEGORY</th>
+              {D.units.map(u => (
+                <th key={u} style={TH()}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:5 }}>
+                    <div style={{ width:7, height:7, borderRadius:"50%", background:UC[u] }} />
+                    {u}
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={row.key} style={{ background:i%2===0?"#fff":"#FAFAFA", borderBottom:"1px solid #F3F4F6" }}>
+                <td style={TD("left", { fontWeight:600, color:"#374151" })}>{row.label}</td>
+                {D.units.map(u => {
+                  const val = D.unitData[u][row.key];
+                  return (
+                    <td key={u} style={{ ...TD(), ...hlCell(row.key, val, row.badHigh) }}>
+                      {val ?? "—"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+            <tr style={{ background:"#F8FAFC", borderTop:"2px solid #E5E7EB" }}>
+              <td style={TD("left", { fontWeight:700, color:"#374151" })}>Weakest Area</td>
+              {D.units.map(u => (
+                <td key={u} style={TD("center", { fontSize:11, color:"#6B7280" })}>
+                  {D.unitData[u].weakestArea}
+                </td>
+              ))}
+            </tr>
+            <tr style={{ background:"#F8FAFC" }}>
+              <td style={TD("left", { fontWeight:700, color:"#374151" })}>Highest Critical Area</td>
+              {D.units.map(u => (
+                <td key={u} style={TD("center", { fontSize:11, color:"#DC2626", fontWeight:600 })}>
+                  {D.unitData[u].highestCriticalArea}
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ fontSize:13, fontWeight:700, color:"#374151", marginBottom:10 }}>
+        Criticality Distribution by Unit
+      </div>
+      <ResponsiveContainer width="100%" height={240}>
+        <BarChart data={chartData} margin={{ top:4, right:16, bottom:4, left:0 }}>
+          <XAxis dataKey="name" tick={{ fontSize:12, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <Tooltip contentStyle={{ borderRadius:8, border:"1px solid #E5E7EB", fontSize:12 }} />
+          <Legend wrapperStyle={{ fontSize:12 }} />
+          <Bar dataKey="Critical" stackId="a" fill="#EF4444" />
+          <Bar dataKey="High"     stackId="a" fill="#F97316" />
+          <Bar dataKey="Medium"   stackId="a" fill="#F59E0B" />
+          <Bar dataKey="Low"      stackId="a" fill="#22C55E" radius={[5,5,0,0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </Section>
+  );
+}
+
+// ── AREA-WISE ─────────────────────────────────────────────────────────────────
+function AreaWise() {
+  const [sel, setSel] = useState(D.units[0]);
+  const ud = D.unitData[sel];
+  return (
+    <Section title="Area-wise Observations" sub="Select a unit to view its breakdown" accent="#059669">
+      {/* Unit tabs */}
+      <div style={{ display:"flex", gap:8, marginBottom:20, flexWrap:"wrap" }}>
+        {D.units.map(u => (
+          <button key={u} onClick={() => setSel(u)} style={{
+            display:"flex", alignItems:"center", gap:6,
+            background: sel===u ? UC[u] : "#F1F5F9",
+            color: sel===u ? "#fff" : "#475569",
+            border: `2px solid ${sel===u ? UC[u] : "transparent"}`,
+            borderRadius:8, padding:"7px 16px", fontWeight:700, fontSize:13, cursor:"pointer"
+          }}>
+            <div style={{ width:7, height:7, borderRadius:"50%",
+              background: sel===u ? "rgba(255,255,255,.6)" : UC[u] }} />
+            {u}
+          </button>
+        ))}
+      </div>
+
+      {/* Risk strip */}
+      <div style={{ display:"flex", gap:12, marginBottom:18, flexWrap:"wrap" }}>
+        {["critical","high","medium","low"].map(k => {
+          const cap = k[0].toUpperCase()+k.slice(1);
+          return (
+            <div key={k} style={{ background:RC[cap].bg, border:`1px solid ${RC[cap].border}`,
+              borderRadius:9, padding:"10px 16px", minWidth:80 }}>
+              <div style={{ fontSize:10, fontWeight:700, color:RC[cap].fg, letterSpacing:.5 }}>{cap.toUpperCase()}</div>
+              <div style={{ fontSize:26, fontWeight:900, color:RC[cap].fg, lineHeight:1.1 }}>{ud[k]}</div>
+            </div>
+          );
+        })}
+        <div style={{ background:"#F8FAFC", border:"1px solid #E5E7EB",
+          borderRadius:9, padding:"10px 16px", minWidth:80 }}>
+          <div style={{ fontSize:10, fontWeight:700, color:"#6B7280", letterSpacing:.5 }}>TOTAL</div>
+          <div style={{ fontSize:26, fontWeight:900, color:"#0F172A", lineHeight:1.1 }}>{ud.total}</div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom:18 }}>
+        <Stack c={ud.critical} h={ud.high} m={ud.medium} l={ud.low} t={ud.total} height={10} />
+        <div style={{ display:"flex", gap:16, marginTop:6 }}>
+          {["Critical","High","Medium","Low"].map(r => (
+            <div key={r} style={{ display:"flex", alignItems:"center", gap:4 }}>
+              <div style={{ width:8, height:8, borderRadius:"50%", background:RC[r].dot }} />
+              <span style={{ fontSize:11, color:"#6B7280" }}>{r}: {ud[r.toLowerCase()]} ({ud.total?Math.round(ud[r.toLowerCase()]/ud.total*100):0}%)</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Area table */}
+      <div style={{ overflowX:"auto" }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr>
+              <th style={TH("left")}>AREA</th>
+              <th style={TH()}>CRITICAL</th>
+              <th style={TH()}>HIGH</th>
+              <th style={TH()}>MEDIUM</th>
+              <th style={TH()}>LOW</th>
+              <th style={TH()}>TOTAL</th>
+              <th style={{ ...TH(), width:100 }}>SPLIT</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(ud.areas).sort((a,b) => b[1].t - a[1].t).map(([area, v], i) => (
+              <tr key={area} style={{ background:i%2===0?"#fff":"#FAFAFA", borderBottom:"1px solid #F3F4F6" }}>
+                <td style={TD("left", { fontWeight:600, color:"#374151" })}>{area}</td>
+                {["c","h","m","l"].map(k => {
+                  const rk = {c:"Critical",h:"High",m:"Medium",l:"Low"}[k];
+                  return (
+                    <td key={k} style={TD()}>
+                      {v[k] > 0
+                        ? <span style={{ background:RC[rk].bg, color:RC[rk].fg,
+                            borderRadius:4, padding:"2px 9px", fontWeight:700 }}>{v[k]}</span>
+                        : <span style={{ color:"#D1D5DB" }}>—</span>}
+                    </td>
+                  );
+                })}
+                <td style={TD("center", { fontWeight:800, color:"#0F172A" })}>{v.t}</td>
+                <td style={{ padding:"9px 12px" }}>
+                  <Stack c={v.c} h={v.h} m={v.m} l={v.l} t={v.t} height={6} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Section>
+  );
+}
+
+// ── COMMON OBSERVATIONS ───────────────────────────────────────────────────────
+function CommonObs() {
+  const [filter, setFilter] = useState("All");
+  const procs = ["All", ...new Set(D.commonObservations.map(o => o.process))];
+  const filtered = filter === "All" ? D.commonObservations : D.commonObservations.filter(o => o.process === filter);
+  return (
+    <Section title="Common Observations" sub="Systemic issues appearing across multiple units — require HO-level action" accent="#1D4ED8">
+      <div style={{ display:"flex", gap:8, marginBottom:18, flexWrap:"wrap" }}>
+        {procs.map(p => (
+          <button key={p} onClick={() => setFilter(p)} style={{
+            background: filter===p ? "#1D4ED8" : "#F1F5F9",
+            color: filter===p ? "#fff" : "#475569",
+            border:"none", borderRadius:7, padding:"5px 14px",
+            fontWeight:600, fontSize:12, cursor:"pointer"
+          }}>{p}</button>
+        ))}
+      </div>
+      <div style={{ overflowX:"auto" }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr>
+              <th style={TH("left")}>PROCESS</th>
+              <th style={TH("left")}>OBSERVATION</th>
+              <th style={TH()}>RISK</th>
+              {D.units.map(u => (
+                <th key={u} style={{ ...TH(), minWidth:52 }}>
+                  <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
+                    <div style={{ width:7, height:7, borderRadius:"50%", background:UC[u] }} />
+                    <span style={{ fontSize:9 }}>{u.substring(0,4)}</span>
+                  </div>
+                </th>
+              ))}
+              <th style={TH()}>N</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((obs, i) => (
+              <tr key={i} style={{ background:i%2===0?"#fff":"#FAFAFA", borderBottom:"1px solid #F3F4F6" }}>
+                <td style={TD("left", { fontWeight:600, color:"#374151", whiteSpace:"nowrap", fontSize:12 })}>{obs.process}</td>
+                <td style={TD("left", { color:"#1E293B", fontSize:12, maxWidth:280 })}>{obs.obs}</td>
+                <td style={TD()}><Chip level={obs.risk.split("/")[0]} /></td>
+                {D.units.map(u => (
+                  <td key={u} style={TD()}>
+                    {obs.units.includes(u)
+                      ? <span style={{ color:"#16A34A", fontSize:16, lineHeight:1 }}>✓</span>
+                      : <span style={{ color:"#E5E7EB", fontSize:13 }}>—</span>}
+                  </td>
+                ))}
+                <td style={TD()}>
+                  <span style={{ background:"#EFF6FF", color:"#1D4ED8",
+                    borderRadius:10, padding:"1px 8px", fontWeight:800, fontSize:12 }}>
+                    {obs.units.length}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Section>
+  );
+}
+
+// ── REPEATED OBSERVATIONS ─────────────────────────────────────────────────────
+function RepeatedObs() {
+  const areas = Object.keys(D.repeatedObsByArea);
+  const chartData = areas.map(area => {
+    const row = { name: area };
+    D.units.forEach(u => { row[u] = D.repeatedObsByArea[area][u] || 0; });
+    return row;
+  });
+  return (
+    <Section title="Repeated Observations" sub="Raised again in current year — not actioned from prior audit" accent="#DC2626">
+      <div style={{ overflowX:"auto", marginBottom:24 }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ background:"#FEF2F2" }}>
+              <th style={TH("left")}>PROCESS</th>
+              {D.units.map(u => (
+                <th key={u} style={{ ...TH(), color:"#991B1B" }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:5 }}>
+                    <div style={{ width:7, height:7, borderRadius:"50%", background:UC[u] }} />
+                    {u}
+                  </div>
+                </th>
+              ))}
+              <th style={{ ...TH(), color:"#991B1B" }}>TOTAL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {areas.map((area, i) => {
+              const total = D.units.reduce((a, u) => a + (D.repeatedObsByArea[area][u] || 0), 0);
+              return (
+                <tr key={area} style={{ background:i%2===0?"#fff":"#FAFAFA", borderBottom:"1px solid #F3F4F6" }}>
+                  <td style={TD("left", { fontWeight:600, color:"#374151" })}>{area}</td>
+                  {D.units.map(u => {
+                    const v = D.repeatedObsByArea[area][u] || 0;
+                    return (
+                      <td key={u} style={TD()}>
+                        {v > 0
+                          ? <span style={{ background:"#FEF2F2", color:"#DC2626",
+                              borderRadius:4, padding:"2px 9px", fontWeight:700 }}>{v}</span>
+                          : <span style={{ color:"#D1D5DB" }}>—</span>}
+                      </td>
+                    );
+                  })}
+                  <td style={TD("center", { fontWeight:800, color:"#DC2626" })}>{total}</td>
+                </tr>
+              );
+            })}
+            <tr style={{ background:"#FEF2F2", borderTop:"2px solid #FECACA" }}>
+              <td style={TD("left", { fontWeight:800, color:"#0F172A" })}>Total</td>
+              {D.units.map(u => {
+                const t = areas.reduce((a, area) => a + (D.repeatedObsByArea[area][u] || 0), 0);
+                return <td key={u} style={TD("center", { fontWeight:900, color:"#DC2626" })}>{t}</td>;
+              })}
+              <td style={TD("center", { fontWeight:900, color:"#DC2626" })}>
+                {areas.reduce((a, area) => a + D.units.reduce((b, u) => b + (D.repeatedObsByArea[area][u] || 0), 0), 0)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ResponsiveContainer width="100%" height={200}>
+        <BarChart data={chartData} margin={{ top:4, right:16, bottom:4, left:0 }}>
+          <XAxis dataKey="name" tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <Tooltip contentStyle={{ borderRadius:8, border:"1px solid #E5E7EB", fontSize:12 }} />
+          <Legend wrapperStyle={{ fontSize:12 }} />
+          {D.units.map(u => <Bar key={u} dataKey={u} fill={UC[u]} stackId="a" radius={[2,2,0,0]} maxBarSize={60} />)}
+        </BarChart>
+      </ResponsiveContainer>
+    </Section>
+  );
+}
+
+// ── PRIOR YEAR OPEN ───────────────────────────────────────────────────────────
+function PriorYearOpen() {
+  const areas = Object.keys(D.priorOpenByArea);
+  const chartData = areas.map(area => {
+    const row = { name: area };
+    D.units.forEach(u => { row[u] = D.priorOpenByArea[area][u] || 0; });
+    return row;
+  });
+  return (
+    <Section title="Previous Year Open Observations" sub="From FY 2023-24 — still not closed as of current audit" accent="#7C3AED">
+      <div style={{ background:"#FEF2F2", border:"1px solid #FECACA", borderRadius:8,
+        padding:"10px 16px", fontSize:12, color:"#991B1B", marginBottom:18, fontWeight:500 }}>
+        ⚠️ <strong>Gurugram: 41 open observations</strong> (58.5% of total 70) ·
+        <strong> Sanand: 27</strong> · Immediate management intervention required.
+      </div>
+      <div style={{ overflowX:"auto", marginBottom:24 }}>
+        <table style={{ width:"100%", borderCollapse:"collapse" }}>
+          <thead>
+            <tr style={{ background:"#F5F3FF" }}>
+              <th style={{ ...TH("left"), color:"#6D28D9" }}>PROCESS</th>
+              {D.units.map(u => (
+                <th key={u} style={{ ...TH(), color:"#6D28D9" }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:5 }}>
+                    <div style={{ width:7, height:7, borderRadius:"50%", background:UC[u] }} />
+                    {u}
+                  </div>
+                </th>
+              ))}
+              <th style={{ ...TH(), color:"#6D28D9" }}>TOTAL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {areas.map((area, i) => {
+              const total = D.units.reduce((a, u) => a + (D.priorOpenByArea[area][u] || 0), 0);
+              return (
+                <tr key={area} style={{ background:i%2===0?"#fff":"#FAFAFA", borderBottom:"1px solid #F3F4F6" }}>
+                  <td style={TD("left", { fontWeight:600, color:"#374151" })}>{area}</td>
+                  {D.units.map(u => {
+                    const v = D.priorOpenByArea[area][u] || 0;
+                    return (
+                      <td key={u} style={TD()}>
+                        {v > 0
+                          ? <span style={{ background: v >= 8 ? "#FEF2F2" : "#F5F3FF",
+                              color: v >= 8 ? "#DC2626" : "#6D28D9",
+                              borderRadius:4, padding:"2px 9px", fontWeight:700 }}>{v}</span>
+                          : <span style={{ color:"#D1D5DB" }}>—</span>}
+                      </td>
+                    );
+                  })}
+                  <td style={TD("center", { fontWeight:800, color:"#7C3AED" })}>{total}</td>
+                </tr>
+              );
+            })}
+            <tr style={{ background:"#F5F3FF", borderTop:"2px solid #DDD6FE" }}>
+              <td style={TD("left", { fontWeight:800, color:"#0F172A" })}>Total</td>
+              {D.units.map(u => {
+                const t = areas.reduce((a, area) => a + (D.priorOpenByArea[area][u] || 0), 0);
+                return (
+                  <td key={u} style={TD("center", { fontWeight:900, color: t >= 30 ? "#DC2626" : "#7C3AED" })}>{t}</td>
+                );
+              })}
+              <td style={TD("center", { fontWeight:900, color:"#7C3AED" })}>
+                {areas.reduce((a, area) => a + D.units.reduce((b, u) => b + (D.priorOpenByArea[area][u] || 0), 0), 0)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ResponsiveContainer width="100%" height={200}>
+        <BarChart data={chartData} margin={{ top:4, right:16, bottom:4, left:0 }}>
+          <XAxis dataKey="name" tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize:11, fill:"#6B7280" }} axisLine={false} tickLine={false} />
+          <Tooltip contentStyle={{ borderRadius:8, border:"1px solid #E5E7EB", fontSize:12 }} />
+          <Legend wrapperStyle={{ fontSize:12 }} />
+          {D.units.map(u => <Bar key={u} dataKey={u} fill={UC[u]} stackId="a" radius={[2,2,0,0]} maxBarSize={60} />)}
+        </BarChart>
+      </ResponsiveContainer>
+    </Section>
+  );
+}
+
+// ── LIMITATIONS ───────────────────────────────────────────────────────────────
+function Limitations() {
+  const sorted = Object.entries(D.limitations).sort((a, b) => b[1] - a[1]);
+  return (
+    <Section title="Unit-wise Limitations" sub="Data not provided to auditors — impacts completeness of findings" accent="#6B7280">
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))", gap:14, marginBottom:18 }}>
+        {sorted.map(([unit, count]) => (
+          <div key={unit} style={{
+            background: count > 20 ? "#FEF2F2" : count > 10 ? "#FFFBEB" : "#F0FDF4",
+            borderRadius:10, padding:"16px 18px",
+            borderLeft:`4px solid ${UC[unit]}`
+          }}>
+            <div style={{ fontSize:11, fontWeight:700, color:"#6B7280", marginBottom:4 }}>
+              {unit.toUpperCase()}
+            </div>
+            <div style={{ fontSize:32, fontWeight:900, lineHeight:1,
+              color: count > 20 ? "#DC2626" : count > 10 ? "#D97706" : "#16A34A" }}>
+              {count}
+            </div>
+            <div style={{ fontSize:11, color:"#6B7280", marginTop:4 }}>limitations</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ background:"#F8FAFC", borderRadius:8, padding:"12px 16px",
+        fontSize:12, color:"#6B7280", lineHeight:1.6 }}>
+        Sanand's 50 limitations include 36 in Human Resource alone — substantially limiting the audit's ability to assess HR compliance.
+        Management should ensure complete data access for the next audit cycle.
+      </div>
+    </Section>
+  );
+}
+
+// ── NAV + APP ─────────────────────────────────────────────────────────────────
+const NAV = [
+  { id:"overview",    label:"Overview" },
+  { id:"keyinst",     label:"Key Instances" },
+  { id:"financial",   label:"Financial Impact" },
+  { id:"comparative", label:"Comparative Analysis" },
+  { id:"areawise",    label:"Area-wise" },
+  { id:"common",      label:"Common Observations" },
+  { id:"repeated",    label:"Repeated Observations" },
+  { id:"prioryear",   label:"Prior Year Open" },
+  { id:"limitations", label:"Limitations" },
+];
+
+function App() {
+  const [active, setActive] = useState("overview");
+
+  const render = () => {
+    switch(active) {
+      case "overview":    return <Overview />;
+      case "keyinst":     return <KeyInstances />;
+      case "financial":   return <FinancialImpact />;
+      case "comparative": return <Comparative />;
+      case "areawise":    return <AreaWise />;
+      case "common":      return <CommonObs />;
+      case "repeated":    return <RepeatedObs />;
+      case "prioryear":   return <PriorYearOpen />;
+      case "limitations": return <Limitations />;
+      default:            return null;
+    }
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#F1F5F9",
+      fontFamily:"'Inter',-apple-system,BlinkMacSystemFont,sans-serif" }}>
+
+      {/* Top bar */}
+      <div style={{ background:"#0F172A", padding:"0 24px", position:"sticky", top:0, zIndex:50,
+        boxShadow:"0 1px 0 rgba(255,255,255,.06)" }}>
+        <div style={{ maxWidth:1380, margin:"0 auto", display:"flex",
+          alignItems:"center", justifyContent:"space-between", height:52 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+            <span style={{ fontWeight:900, color:"#EF4444", fontSize:16, letterSpacing:.2 }}>NCLS</span>
+            <div style={{ width:1, height:18, background:"#374151" }} />
+            <span style={{ fontSize:13, color:"#E2E8F0", fontWeight:600 }}>
+              SI Interpack Private Limited · Executive Summary
+            </span>
+            <span style={{ background:"#1E3A5F", color:"#93C5FD", borderRadius:5,
+              padding:"2px 9px", fontSize:11, fontWeight:700 }}>
+              Phase 1 · FY 2024-25
+            </span>
+          </div>
+          <span style={{ fontSize:11, color:"#6B7280", display:"flex", gap:8 }}>
+            {D.units.map(u => (
+              <span key={u} style={{ display:"flex", alignItems:"center", gap:4 }}>
+                <span style={{ width:6, height:6, borderRadius:"50%", background:UC[u], display:"inline-block" }} />
+                <span>{u}</span>
+              </span>
+            ))}
+          </span>
+        </div>
+      </div>
+
+      {/* Tab nav */}
+      <div style={{ background:"#fff", borderBottom:"1px solid #E2E8F0",
+        padding:"0 24px", overflowX:"auto", position:"sticky", top:52, zIndex:40 }}>
+        <div style={{ maxWidth:1380, margin:"0 auto", display:"flex" }}>
+          {NAV.map(item => (
+            <button key={item.id} onClick={() => setActive(item.id)} style={{
+              background:"transparent", border:"none",
+              padding:"13px 16px",
+              fontWeight: active===item.id ? 800 : 500,
+              fontSize:13,
+              color: active===item.id ? "#1D4ED8" : "#64748B",
+              cursor:"pointer",
+              borderBottom: active===item.id ? "3px solid #1D4ED8" : "3px solid transparent",
+              whiteSpace:"nowrap",
+              transition:"color .15s, border-color .15s"
+            }}>{item.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{ maxWidth:1380, margin:"0 auto", padding:"24px" }}>
+        {render()}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+<script>
+  const source = document.getElementById('app-source').textContent;
+  const transformed = Babel.transform(source, { presets: [['react', { runtime: 'classic' }]] }).code;
+  const script = document.createElement('script');
+  script.textContent = transformed;
+  document.body.appendChild(script);
+</script>
+</body>
+</html>
