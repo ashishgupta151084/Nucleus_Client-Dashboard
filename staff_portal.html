@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NCLS & Associates — Staff Portal</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #F1F5F9; min-height: 100vh; }
+  input, select, textarea { font-family: inherit; }
+  button { font-family: inherit; cursor: pointer; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #F1F5F9; } ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/plain" id="app-source">
+const { useState, useRef, useCallback } = React;
+
+// ── Palette ────────────────────────────────────────────────────────────────
+const P = {
+  ink:    "#0D1117",
+  slate:  "#1E293B",
+  mid:    "#475569",
+  muted:  "#94A3B8",
+  border: "#E2E8F0",
+  bg:     "#F1F5F9",
+  white:  "#FFFFFF",
+  blue:   "#1D4ED8",
+  blueLt: "#EFF6FF",
+  blueBd: "#BFDBFE",
+  green:  "#16A34A",
+  greenLt:"#F0FDF4",
+  greenBd:"#BBF7D0",
+  red:    "#DC2626",
+  redLt:  "#FEF2F2",
+  redBd:  "#FECACA",
+  amber:  "#D97706",
+  amberLt:"#FFFBEB",
+  amberBd:"#FDE68A",
+};
+
+// ── ADMIN CONTROLLED — in production this comes from backend ──────────────
+const AUTHORIZED_EMAILS = [
+  "ashish@ncls.in",
+  "staff1@ncls.in",
+  "staff2@ncls.in",
+  "muskan@ncls.in",
+  "aatish@ncls.in",
+];
+
+const CLIENTS = ["SI Interpack Private Limited", "Khanna Paper Mills Limited", "New Swan"];
+const UNITS = {
+  "SI Interpack Private Limited": ["Hinjewadi","Sanand","Rudrapur","Chakan","Gurugram","Chennai","Nashik","Hosur","Dharwad"],
+  "Khanna Paper Mills Limited":   ["Phase 1 — IA","Phase 2 — Physical Verification"],
+  "New Swan":                     ["NSML Vitthlapur","NSE Bangalore"],
+};
+const CURRENT_FY = ["2024-25","2025-26","2026-27"];
+
+// ── JSON SCHEMA VALIDATOR ─────────────────────────────────────────────────
+function validateJSON(json) {
+  const errors = [];
+  const warnings = [];
+
+  if (!json.report_metadata)    errors.push("Missing section: report_metadata");
+  if (!json.audit_summary)      errors.push("Missing section: audit_summary");
+  if (!json.areas || !Array.isArray(json.areas)) errors.push("Missing section: areas (must be array)");
+
+  if (json.report_metadata) {
+    const m = json.report_metadata;
+    ["client_name","unit_name","fy","audit_period_from","audit_period_to"].forEach(k => {
+      if (!m[k]) errors.push(`report_metadata.${k} is missing`);
+    });
+    if (!m.udin)         warnings.push("UDIN not provided in report_metadata");
+    if (!m.overall_rating) warnings.push("overall_rating not provided");
+  }
+
+  if (json.audit_summary?.area_wise_summary) {
+    json.audit_summary.area_wise_summary.forEach(row => {
+      const sum = (row.critical||0)+(row.high||0)+(row.medium||0)+(row.low||0);
+      if (sum !== row.total) errors.push(`Area "${row.area}": risk sum (${sum}) ≠ stated total (${row.total})`);
+    });
+    const r = json.audit_summary.observation_count_by_risk;
+    if (r) {
+      const rTotal = (r.critical||0)+(r.high||0)+(r.medium||0)+(r.low||0);
+      const aTotal = json.audit_summary.area_wise_summary.reduce((a,row)=>a+row.total,0);
+      if (rTotal !== aTotal) warnings.push(`Risk count total (${rTotal}) differs from area-wise total (${aTotal}) — please verify`);
+    }
+  }
+
+  if (json.areas) {
+    json.areas.forEach(area => {
+      if (!area.area_name) errors.push("An area is missing area_name");
+      if (!area.observations || !area.observations.length) warnings.push(`Area "${area.area_name}" has no observations`);
+      area.observations?.forEach((obs, i) => {
+        if (!obs.title)      warnings.push(`${area.area_name} obs #${i+1}: missing title`);
+        if (!obs.risk_level) errors.push(`${area.area_name} obs #${i+1}: missing risk_level`);
+        if (!["Critical","High","Medium","Low"].includes(obs.risk_level))
+          errors.push(`${area.area_name} obs #${i+1}: invalid risk_level "${obs.risk_level}" — must be Critical/High/Medium/Low`);
+      });
+    });
+  }
+
+  const clarifications = json.clarifications_needed || [];
+  return { errors, warnings, clarifications };
+}
+
+// ── OTP SCREEN ────────────────────────────────────────────────────────────
+function OTPScreen({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [otp, setOtp] = useState(["","","","","",""]);
+  const [step, setStep] = useState("email"); // email | otp
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const [resendTimer, setResendTimer] = useState(0);
+  const otpRefs = useRef([]);
+
+  const sendOTP = () => {
+    setError("");
+    if (!email.trim()) { setError("Please enter your email address."); return; }
+    if (!AUTHORIZED_EMAILS.includes(email.trim().toLowerCase())) {
+      setError("This email is not authorized. Contact your administrator.");
+      return;
+    }
+    setSending(true);
+    // Simulate OTP send — in production, call your backend here
+    setTimeout(() => {
+      setSending(false);
+      setStep("otp");
+      setResendTimer(30);
+      const interval = setInterval(() => {
+        setResendTimer(t => { if (t <= 1) { clearInterval(interval); return 0; } return t-1; });
+      }, 1000);
+    }, 1200);
+  };
+
+  const handleOtpChange = (i, val) => {
+    if (!/^\d?$/.test(val)) return;
+    const next = [...otp];
+    next[i] = val;
+    setOtp(next);
+    if (val && i < 5) otpRefs.current[i+1]?.focus();
+    if (!val && i > 0) otpRefs.current[i-1]?.focus();
+  };
+
+  const handleOtpPaste = (e) => {
+    const paste = e.clipboardData.getData("text").replace(/\D/g,"").slice(0,6);
+    if (paste.length === 6) {
+      setOtp(paste.split(""));
+      otpRefs.current[5]?.focus();
+    }
+  };
+
+  const verifyOTP = () => {
+    setError("");
+    const code = otp.join("");
+    if (code.length < 6) { setError("Please enter the full 6-digit code."); return; }
+    // In production: verify against backend. Here we accept any 6-digit code for demo.
+    onLogin(email.trim().toLowerCase());
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#0D1117", display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}>
+      <div style={{ width:"100%", maxWidth:420 }}>
+        {/* Logo */}
+        <div style={{ textAlign:"center", marginBottom:40 }}>
+          <div style={{ display:"inline-flex", alignItems:"center", gap:10, marginBottom:16 }}>
+            <div style={{ width:40, height:40, background:P.blue, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, fontWeight:900, color:"#fff" }}>N</div>
+            <div>
+              <div style={{ fontWeight:800, color:"#F8FAFC", fontSize:16, letterSpacing:.3 }}>NCLS & Associates</div>
+              <div style={{ fontSize:11, color:P.muted, fontWeight:500 }}>Chartered Accountants</div>
+            </div>
+          </div>
+          <div style={{ fontSize:22, fontWeight:800, color:"#F8FAFC", marginBottom:6 }}>Staff Portal</div>
+          <div style={{ fontSize:13, color:P.muted }}>Internal Audit Report Upload</div>
+        </div>
+
+        {/* Card */}
+        <div style={{ background:"#1C2333", borderRadius:16, padding:"32px 28px", border:"1px solid #2D3748" }}>
+          {step === "email" ? (
+            <>
+              <div style={{ fontSize:15, fontWeight:700, color:"#F8FAFC", marginBottom:6 }}>Sign in with email OTP</div>
+              <div style={{ fontSize:13, color:P.muted, marginBottom:24 }}>Enter your authorized email to receive a one-time code.</div>
+              <label style={{ fontSize:12, fontWeight:700, color:P.muted, letterSpacing:.5, display:"block", marginBottom:6 }}>EMAIL ADDRESS</label>
+              <input
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                onKeyDown={e => e.key==="Enter" && sendOTP()}
+                placeholder="you@ncls.in"
+                style={{ width:"100%", background:"#0D1117", border:`1px solid ${error?"#EF4444":"#2D3748"}`, borderRadius:8, padding:"11px 14px", color:"#F8FAFC", fontSize:14, outline:"none", marginBottom:8 }}
+                autoFocus
+              />
+              {error && <div style={{ fontSize:12, color:"#EF4444", marginBottom:8 }}>{error}</div>}
+              <button
+                onClick={sendOTP}
+                disabled={sending}
+                style={{ width:"100%", background:sending?"#374151":P.blue, color:"#fff", border:"none", borderRadius:8, padding:"12px 0", fontWeight:700, fontSize:14, marginTop:8, transition:"background .15s" }}
+              >
+                {sending ? "Sending code..." : "Send One-Time Code →"}
+              </button>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize:15, fontWeight:700, color:"#F8FAFC", marginBottom:4 }}>Enter your code</div>
+              <div style={{ fontSize:13, color:P.muted, marginBottom:24 }}>A 6-digit code was sent to <strong style={{ color:"#93C5FD" }}>{email}</strong></div>
+              <div style={{ display:"flex", gap:8, justifyContent:"center", marginBottom:20 }}>
+                {otp.map((digit, i) => (
+                  <input
+                    key={i}
+                    ref={el => otpRefs.current[i] = el}
+                    value={digit}
+                    onChange={e => handleOtpChange(i, e.target.value)}
+                    onPaste={handleOtpPaste}
+                    onKeyDown={e => e.key==="Backspace" && !digit && i>0 && otpRefs.current[i-1]?.focus()}
+                    maxLength={1}
+                    style={{ width:44, height:52, textAlign:"center", fontSize:22, fontWeight:800, background:"#0D1117", border:`1.5px solid ${digit?"#3B82F6":"#2D3748"}`, borderRadius:8, color:"#F8FAFC", outline:"none" }}
+                  />
+                ))}
+              </div>
+              {error && <div style={{ fontSize:12, color:"#EF4444", marginBottom:8, textAlign:"center" }}>{error}</div>}
+              <button
+                onClick={verifyOTP}
+                style={{ width:"100%", background:P.blue, color:"#fff", border:"none", borderRadius:8, padding:"12px 0", fontWeight:700, fontSize:14, marginBottom:12 }}
+              >
+                Verify & Sign In →
+              </button>
+              <div style={{ textAlign:"center", fontSize:12, color:P.muted }}>
+                {resendTimer > 0
+                  ? `Resend code in ${resendTimer}s`
+                  : <span onClick={() => { setStep("email"); setOtp(["","","","","",""]); setError(""); }} style={{ color:"#93C5FD", cursor:"pointer" }}>← Change email / Resend code</span>
+                }
+              </div>
+            </>
+          )}
+        </div>
+
+        <div style={{ textAlign:"center", marginTop:20, fontSize:11, color:"#374151" }}>
+          Access restricted to authorized staff only. Contact admin for access.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── FILE DROP ZONE ─────────────────────────────────────────────────────────
+function FileDropZone({ label, accept, file, onFile, required, hint }) {
+  const [dragging, setDragging] = useState(false);
+  const ref = useRef();
+
+  const onDrop = e => {
+    e.preventDefault();
+    setDragging(false);
+    const f = e.dataTransfer.files[0];
+    if (f) onFile(f);
+  };
+
+  const ext = file?.name?.split(".").pop()?.toUpperCase();
+
+  return (
+    <div>
+      <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:6 }}>
+        {label} {required && <span style={{ color:P.red }}>*</span>}
+      </label>
+      {hint && <div style={{ fontSize:11, color:P.muted, marginBottom:6 }}>{hint}</div>}
+      <div
+        onDragOver={e => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={onDrop}
+        onClick={() => ref.current.click()}
+        style={{
+          border:`2px dashed ${dragging ? P.blue : file ? P.green : P.border}`,
+          borderRadius:10, padding:"18px 16px", textAlign:"center",
+          background: dragging ? P.blueLt : file ? P.greenLt : P.white,
+          cursor:"pointer", transition:"all .15s"
+        }}
+      >
+        <input ref={ref} type="file" accept={accept} style={{ display:"none" }} onChange={e => onFile(e.target.files[0])} />
+        {file ? (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
+            <div style={{ background:P.green, color:"#fff", borderRadius:6, padding:"3px 8px", fontSize:11, fontWeight:700 }}>{ext}</div>
+            <span style={{ fontSize:13, fontWeight:600, color:P.green }}>{file.name}</span>
+            <span style={{ fontSize:12, color:P.muted }}>({(file.size/1024).toFixed(0)} KB)</span>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize:24, marginBottom:6, color:P.muted }}>📎</div>
+            <div style={{ fontSize:13, color:P.mid, fontWeight:600 }}>Drop file here or click to select</div>
+            <div style={{ fontSize:11, color:P.muted, marginTop:3 }}>{accept}</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── VALIDATION RESULT ─────────────────────────────────────────────────────
+function ValidationPanel({ result, onConfirm, onReset, answers, setAnswers }) {
+  const { errors, warnings, clarifications } = result;
+  const hasErrors = errors.length > 0;
+  const hasClarifications = clarifications.length > 0;
+  const allAnswered = clarifications.every((c, i) => answers[i] !== undefined && answers[i] !== "");
+
+  return (
+    <div>
+      {/* Errors */}
+      {errors.length > 0 && (
+        <div style={{ background:P.redLt, border:`1px solid ${P.redBd}`, borderRadius:10, padding:"16px 18px", marginBottom:14 }}>
+          <div style={{ fontWeight:800, color:P.red, fontSize:14, marginBottom:10 }}>⛔ {errors.length} validation error{errors.length>1?"s":""} — upload cannot proceed</div>
+          {errors.map((e, i) => <div key={i} style={{ fontSize:13, color:"#991B1B", marginBottom:4, paddingLeft:12, borderLeft:`2px solid ${P.red}` }}>• {e}</div>)}
+          <button onClick={onReset} style={{ marginTop:12, background:P.redLt, color:P.red, border:`1px solid ${P.redBd}`, borderRadius:7, padding:"7px 14px", fontWeight:700, fontSize:12 }}>
+            ← Re-upload corrected JSON
+          </button>
+        </div>
+      )}
+
+      {/* Warnings */}
+      {warnings.length > 0 && (
+        <div style={{ background:P.amberLt, border:`1px solid ${P.amberBd}`, borderRadius:10, padding:"16px 18px", marginBottom:14 }}>
+          <div style={{ fontWeight:800, color:P.amber, fontSize:14, marginBottom:10 }}>⚠️ {warnings.length} warning{warnings.length>1?"s":""} — review before proceeding</div>
+          {warnings.map((w, i) => <div key={i} style={{ fontSize:13, color:"#92400E", marginBottom:4, paddingLeft:12, borderLeft:`2px solid ${P.amber}` }}>• {w}</div>)}
+        </div>
+      )}
+
+      {/* Clarifications from AI */}
+      {clarifications.length > 0 && (
+        <div style={{ background:P.amberLt, border:`1px solid ${P.amberBd}`, borderRadius:10, padding:"16px 18px", marginBottom:14 }}>
+          <div style={{ fontWeight:800, color:P.amber, fontSize:14, marginBottom:4 }}>🤖 AI flagged {clarifications.length} item{clarifications.length>1?"s":""} for your review</div>
+          <div style={{ fontSize:12, color:"#92400E", marginBottom:14 }}>The AI was uncertain about these — please confirm the correct value before uploading.</div>
+          {clarifications.map((c, i) => (
+            <div key={i} style={{ background:"#fff", borderRadius:8, padding:"12px 14px", marginBottom:10, border:`1px solid ${P.amberBd}` }}>
+              <div style={{ fontSize:11, fontWeight:700, color:P.amber, marginBottom:4, letterSpacing:.5 }}>FIELD: {c.field}</div>
+              <div style={{ fontSize:12, color:"#78350F", marginBottom:8 }}>{c.question}</div>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                <span style={{ fontSize:11, color:P.muted }}>AI extracted:</span>
+                <code style={{ background:P.amberLt, padding:"2px 8px", borderRadius:4, fontSize:11, color:"#92400E" }}>{c.extracted_value}</code>
+              </div>
+              <input
+                placeholder={`Enter correct value (or leave blank to keep: "${c.extracted_value}")`}
+                value={answers[i] || ""}
+                onChange={e => setAnswers(a => ({ ...a, [i]: e.target.value }))}
+                style={{ width:"100%", border:`1px solid ${answers[i] ? P.green : P.amberBd}`, borderRadius:7, padding:"8px 10px", fontSize:12, outline:"none", background:"#fff" }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Success / proceed */}
+      {!hasErrors && (errors.length === 0) && (
+        <div style={{ background:P.greenLt, border:`1px solid ${P.greenBd}`, borderRadius:10, padding:"16px 18px", marginBottom:14 }}>
+          <div style={{ fontWeight:800, color:P.green, fontSize:14, marginBottom:4 }}>
+            ✅ JSON validated successfully
+          </div>
+          <div style={{ fontSize:12, color:"#166534" }}>
+            {warnings.length > 0 ? "Warnings noted above — you may still proceed." : "No issues found. Ready to submit."}
+          </div>
+        </div>
+      )}
+
+      {!hasErrors && (!hasClarifications || allAnswered) && (
+        <button
+          onClick={onConfirm}
+          style={{ width:"100%", background:P.green, color:"#fff", border:"none", borderRadius:10, padding:"13px 0", fontWeight:800, fontSize:15, marginTop:4 }}
+        >
+          Confirm & Submit Report →
+        </button>
+      )}
+
+      {!hasErrors && hasClarifications && !allAnswered && (
+        <div style={{ fontSize:12, color:P.muted, textAlign:"center", marginTop:8 }}>
+          Please answer all flagged questions above before submitting.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── SUCCESS SCREEN ────────────────────────────────────────────────────────
+function SuccessScreen({ meta, onUploadAnother }) {
+  return (
+    <div style={{ textAlign:"center", padding:"48px 24px" }}>
+      <div style={{ width:72, height:72, background:P.greenLt, borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:36, margin:"0 auto 20px" }}>✓</div>
+      <h2 style={{ fontSize:22, fontWeight:800, color:P.slate, marginBottom:8 }}>Report submitted</h2>
+      <p style={{ fontSize:14, color:P.mid, marginBottom:24 }}>
+        <strong>{meta.client} — {meta.unit}</strong> · FY {meta.fy} has been uploaded and queued for the dashboard.
+      </p>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, maxWidth:420, margin:"0 auto 32px" }}>
+        {[["Client", meta.client.split(" ").slice(0,2).join(" ")], ["Unit", meta.unit], ["FY", meta.fy]].map(([k,v]) => (
+          <div key={k} style={{ background:P.greenLt, borderRadius:8, padding:"12px 10px" }}>
+            <div style={{ fontSize:10, fontWeight:700, color:P.green, letterSpacing:.5 }}>{k}</div>
+            <div style={{ fontSize:13, fontWeight:700, color:P.slate, marginTop:3 }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <button onClick={onUploadAnother} style={{ background:P.blue, color:"#fff", border:"none", borderRadius:9, padding:"11px 28px", fontWeight:700, fontSize:14 }}>
+        Upload another report
+      </button>
+    </div>
+  );
+}
+
+// ── MAIN UPLOAD FORM ──────────────────────────────────────────────────────
+function UploadForm({ email, onLogout }) {
+  const [client, setClient] = useState("");
+  const [unit, setUnit] = useState("");
+  const [fy, setFy] = useState("");
+  const [periodFrom, setPeriodFrom] = useState("");
+  const [periodTo, setPeriodTo] = useState("");
+  const [auditors, setAuditors] = useState("");
+  const [udin, setUdin] = useState("");
+
+  const [jsonFile, setJsonFile] = useState(null);
+  const [reportFile, setReportFile] = useState(null);
+  const [annexureFile, setAnnexureFile] = useState(null);
+
+  const [jsonData, setJsonData] = useState(null);
+  const [validationResult, setValidationResult] = useState(null);
+  const [clarificationAnswers, setClarificationAnswers] = useState({});
+  const [step, setStep] = useState("form"); // form | validating | validated | submitting | success
+
+  const handleJsonUpload = useCallback(file => {
+    setJsonFile(file);
+    setValidationResult(null);
+    setJsonData(null);
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const data = JSON.parse(e.target.result.trim());
+        setJsonData(data);
+        // Auto-fill metadata from JSON if fields are empty
+        if (!client && data.report_metadata?.client_name) setClient(data.report_metadata.client_name);
+        if (!unit && data.report_metadata?.unit_name) setUnit(data.report_metadata.unit_name);
+        if (!fy && data.report_metadata?.fy) setFy(data.report_metadata.fy);
+        if (!periodFrom && data.report_metadata?.audit_period_from) setPeriodFrom(data.report_metadata.audit_period_from);
+        if (!periodTo && data.report_metadata?.audit_period_to) setPeriodTo(data.report_metadata.audit_period_to);
+        if (!udin && data.report_metadata?.udin) setUdin(data.report_metadata.udin);
+        if (!auditors && data.report_metadata?.auditors?.length) setAuditors(data.report_metadata.auditors.join(", "));
+      } catch (err) {
+        setValidationResult({ errors: [`Invalid JSON file: ${err.message}`], warnings: [], clarifications: [] });
+        setJsonData(null);
+      }
+    };
+    reader.readAsText(file);
+  }, [client, unit, fy, periodFrom, periodTo, udin, auditors]);
+
+  const metadataComplete = client && unit && fy && periodFrom && periodTo;
+  const filesComplete = jsonFile && reportFile;
+  const canValidate = metadataComplete && filesComplete && jsonData;
+
+  const runValidation = () => {
+    if (!jsonData) return;
+    setStep("validating");
+    setTimeout(() => {
+      const result = validateJSON(jsonData);
+      setValidationResult(result);
+      setClarificationAnswers({});
+      setStep("validated");
+    }, 800);
+  };
+
+  const handleSubmit = () => {
+    setStep("submitting");
+    // In production: POST to backend with files + metadata
+    // For now simulate a submission
+    setTimeout(() => setStep("success"), 1500);
+  };
+
+  const resetForm = () => {
+    setClient(""); setUnit(""); setFy(""); setPeriodFrom(""); setPeriodTo(""); setAuditors(""); setUdin("");
+    setJsonFile(null); setReportFile(null); setAnnexureFile(null);
+    setJsonData(null); setValidationResult(null); setClarificationAnswers({});
+    setStep("form");
+  };
+
+  if (step === "success") return (
+    <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"8px 0" }}>
+      <SuccessScreen meta={{ client, unit, fy }} onUploadAnother={resetForm} />
+    </div>
+  );
+
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20, alignItems:"start" }}>
+      {/* LEFT: Metadata + Files */}
+      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        {/* Metadata card */}
+        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px 22px" }}>
+          <div style={{ fontSize:14, fontWeight:800, color:P.slate, marginBottom:16, paddingBottom:12, borderBottom:`1px solid ${P.border}` }}>
+            📋 Report Metadata
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            {/* Client */}
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:5 }}>CLIENT <span style={{ color:P.red }}>*</span></label>
+              <select value={client} onChange={e => { setClient(e.target.value); setUnit(""); }}
+                style={{ width:"100%", background:P.white, border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 10px", fontSize:13, color:client?P.slate:P.muted, outline:"none" }}>
+                <option value="">Select client...</option>
+                {CLIENTS.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            {/* Unit */}
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:5 }}>UNIT <span style={{ color:P.red }}>*</span></label>
+              <select value={unit} onChange={e => setUnit(e.target.value)} disabled={!client}
+                style={{ width:"100%", background:client?P.white:"#F8FAFC", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 10px", fontSize:13, color:unit?P.slate:P.muted, outline:"none" }}>
+                <option value="">Select unit...</option>
+                {(UNITS[client]||[]).map(u => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+            {/* FY */}
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:5 }}>FINANCIAL YEAR <span style={{ color:P.red }}>*</span></label>
+              <select value={fy} onChange={e => setFy(e.target.value)}
+                style={{ width:"100%", background:P.white, border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 10px", fontSize:13, color:fy?P.slate:P.muted, outline:"none" }}>
+                <option value="">Select FY...</option>
+                {CURRENT_FY.map(f => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </div>
+            {/* Period */}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+              <div>
+                <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:5 }}>PERIOD FROM <span style={{ color:P.red }}>*</span></label>
+                <input type="date" value={periodFrom} onChange={e => setPeriodFrom(e.target.value)}
+                  style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 10px", fontSize:12, outline:"none", color:P.slate }} />
+              </div>
+              <div>
+                <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:5 }}>PERIOD TO <span style={{ color:P.red }}>*</span></label>
+                <input type="date" value={periodTo} onChange={e => setPeriodTo(e.target.value)}
+                  style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 10px", fontSize:12, outline:"none", color:P.slate }} />
+              </div>
+            </div>
+            {/* Auditors */}
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:5 }}>AUDITORS</label>
+              <input value={auditors} onChange={e => setAuditors(e.target.value)} placeholder="e.g. Aatish Aggarwal, Muskan Bansal"
+                style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 10px", fontSize:13, outline:"none", color:P.slate }} />
+            </div>
+            {/* UDIN */}
+            <div>
+              <label style={{ fontSize:12, fontWeight:700, color:P.mid, letterSpacing:.5, display:"block", marginBottom:5 }}>UDIN</label>
+              <input value={udin} onChange={e => setUdin(e.target.value)} placeholder="e.g. 25418237BMZYXD6529"
+                style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 10px", fontSize:13, outline:"none", fontFamily:"monospace", color:P.slate }} />
+            </div>
+          </div>
+        </div>
+
+        {/* Files card */}
+        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px 22px" }}>
+          <div style={{ fontSize:14, fontWeight:800, color:P.slate, marginBottom:16, paddingBottom:12, borderBottom:`1px solid ${P.border}` }}>
+            📁 Files
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <FileDropZone
+              label="Structured JSON File"
+              accept=".json"
+              file={jsonFile}
+              onFile={handleJsonUpload}
+              required
+              hint="Generated by the staff prompt template via Claude / ChatGPT"
+            />
+            <FileDropZone
+              label="Audit Report"
+              accept=".pdf,.pptx,.ppt"
+              file={reportFile}
+              onFile={setReportFile}
+              required
+              hint="The original report PDF or PPTX"
+            />
+            <FileDropZone
+              label="Annexure File"
+              accept=".pdf,.xlsx,.xls,.csv"
+              file={annexureFile}
+              onFile={setAnnexureFile}
+              hint="Supporting data tables / annexures (optional)"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* RIGHT: Validation + Submit */}
+      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+        {/* How it works */}
+        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px 22px" }}>
+          <div style={{ fontSize:14, fontWeight:800, color:P.slate, marginBottom:14, paddingBottom:12, borderBottom:`1px solid ${P.border}` }}>
+            📖 How to prepare the JSON
+          </div>
+          {[
+            { n:"1", text:"Open the Staff Prompt Template document" },
+            { n:"2", text:"Copy the full prompt into Claude or ChatGPT" },
+            { n:"3", text:"Attach the report PPTX or PDF" },
+            { n:"4", text:"Save the AI output as a .json file" },
+            { n:"5", text:"Upload it here — the portal validates it automatically" },
+          ].map(s => (
+            <div key={s.n} style={{ display:"flex", gap:10, marginBottom:10, alignItems:"flex-start" }}>
+              <div style={{ width:22, height:22, background:P.blueLt, color:P.blue, borderRadius:6, fontSize:11, fontWeight:800, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, marginTop:1 }}>{s.n}</div>
+              <span style={{ fontSize:13, color:P.mid, lineHeight:1.5 }}>{s.text}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Validate button + result */}
+        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px 22px" }}>
+          <div style={{ fontSize:14, fontWeight:800, color:P.slate, marginBottom:14, paddingBottom:12, borderBottom:`1px solid ${P.border}` }}>
+            ✅ Validate & Submit
+          </div>
+
+          {/* Checklist */}
+          <div style={{ marginBottom:16 }}>
+            {[
+              { label:"Client & unit selected", done:!!client && !!unit },
+              { label:"Financial year selected", done:!!fy },
+              { label:"Audit period set", done:!!periodFrom && !!periodTo },
+              { label:"JSON file uploaded", done:!!jsonFile },
+              { label:"Audit report uploaded", done:!!reportFile },
+            ].map(item => (
+              <div key={item.label} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:7 }}>
+                <div style={{ width:18, height:18, borderRadius:"50%", background:item.done?P.greenLt:P.bg, border:`1.5px solid ${item.done?P.green:P.border}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:item.done?P.green:P.muted, flexShrink:0 }}>
+                  {item.done?"✓":""}
+                </div>
+                <span style={{ fontSize:12, color:item.done?P.slate:P.muted, fontWeight:item.done?600:400 }}>{item.label}</span>
+              </div>
+            ))}
+          </div>
+
+          {step === "form" && (
+            <button
+              onClick={runValidation}
+              disabled={!canValidate}
+              style={{ width:"100%", background:canValidate?P.blue:"#E2E8F0", color:canValidate?"#fff":P.muted, border:"none", borderRadius:9, padding:"12px 0", fontWeight:700, fontSize:14 }}
+            >
+              {canValidate ? "Validate JSON →" : "Complete fields above first"}
+            </button>
+          )}
+
+          {step === "validating" && (
+            <div style={{ textAlign:"center", padding:"20px 0", color:P.muted }}>
+              <div style={{ fontSize:13 }}>Validating JSON...</div>
+            </div>
+          )}
+
+          {step === "validated" && validationResult && (
+            <ValidationPanel
+              result={validationResult}
+              onConfirm={handleSubmit}
+              onReset={() => { setJsonFile(null); setJsonData(null); setValidationResult(null); setStep("form"); }}
+              answers={clarificationAnswers}
+              setAnswers={setClarificationAnswers}
+            />
+          )}
+
+          {step === "submitting" && (
+            <div style={{ textAlign:"center", padding:"20px 0", color:P.green }}>
+              <div style={{ fontSize:13, fontWeight:600 }}>Submitting report...</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── APP ROOT ──────────────────────────────────────────────────────────────
+function App() {
+  const [user, setUser] = useState(null);
+
+  if (!user) return <OTPScreen onLogin={setUser} />;
+
+  return (
+    <div style={{ minHeight:"100vh", background:P.bg }}>
+      {/* Top bar */}
+      <div style={{ background:"#0D1117", padding:"0 28px", position:"sticky", top:0, zIndex:50 }}>
+        <div style={{ maxWidth:1200, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", height:54 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <div style={{ width:30, height:30, background:P.blue, borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, fontWeight:900, color:"#fff" }}>N</div>
+            <div>
+              <span style={{ fontWeight:800, color:"#F8FAFC", fontSize:14 }}>NCLS & Associates</span>
+              <span style={{ color:"#374151", margin:"0 8px" }}>·</span>
+              <span style={{ fontSize:13, color:"#9CA3AF" }}>Staff Portal</span>
+            </div>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+            <div style={{ fontSize:12, color:"#6B7280" }}>{user}</div>
+            <button onClick={() => setUser(null)} style={{ background:"#1C2333", color:"#9CA3AF", border:"1px solid #2D3748", borderRadius:7, padding:"5px 12px", fontSize:12, fontWeight:600 }}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{ maxWidth:1200, margin:"0 auto", padding:"28px 28px" }}>
+        <div style={{ marginBottom:22 }}>
+          <h1 style={{ fontSize:22, fontWeight:900, color:P.slate, marginBottom:4 }}>Upload Audit Report</h1>
+          <p style={{ fontSize:13, color:P.muted }}>Complete all fields, upload the files, validate the JSON, then submit.</p>
+        </div>
+        <UploadForm email={user} onLogout={() => setUser(null)} />
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+<script>
+  window.addEventListener('error', function(e) {
+    const root = document.getElementById('root');
+    if (root && !root.hasChildNodes()) {
+      root.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#DC2626;background:#FEF2F2;border-radius:12px;margin:40px auto;max-width:500px;border:1px solid #FECACA">' +
+        '<h2>Portal failed to load</h2><p>' + (e.message || 'Unknown error') + '</p><p style="font-size:13px;color:#7F1D1D">Check your internet connection and refresh the page.</p></div>';
+    }
+  });
+  const source = document.getElementById('app-source').textContent;
+  const transformed = Babel.transform(source, { presets: [['react', { runtime: 'classic' }]] }).code;
+  const script = document.createElement('script');
+  script.textContent = transformed;
+  document.body.appendChild(script);
+</script>
+</body>
+</html>
