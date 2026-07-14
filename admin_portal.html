@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NCLS & Associates — Admin Portal</title>
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #F1F5F9; min-height: 100vh; }
+  button, input, select, textarea { font-family: inherit; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ── Config ────────────────────────────────────────────────────────────────
+const TENANT_ID   = "e91f8fc1-ec5e-4606-b38d-1ffcdb236dd5";
+const CLIENT_ID   = "6c94258c-442d-4511-a922-5c7ae7f98db8";
+const SP_SITE     = "https://nucleusadvisorsind.sharepoint.com";
+const SP_SITE_REL = "/sites/NCLSAudit"; // will be created
+const SUPER_ADMIN = "ashishgupta151084@gmail.com";
+
+const ROLES = ["Staff","Team Leader","Partner","Senior Partner","Admin","Super Admin"];
+const ROLE_LEVEL = { "Staff":1, "Team Leader":2, "Partner":3, "Senior Partner":4, "Admin":5, "Super Admin":6 };
+const AUDIT_TYPES = ["Internal Audit","Physical Verification","Quarterly Audit","Tax Audit","Statutory Audit"];
+const FREQUENCIES = ["Annual","Quarterly","Half-yearly","Phase-wise","One-time"];
+const CLIENT_TYPES = ["Manufacturing","Banking","NBFC","Services","Other"];
+
+// ── MSAL config ───────────────────────────────────────────────────────────
+const msalConfig = {
+  auth: {
+    clientId: CLIENT_ID,
+    authority: `https://login.microsoftonline.com/${TENANT_ID}`,
+    redirectUri: window.location.origin + window.location.pathname,
+  },
+  cache: { cacheLocation: "sessionStorage" }
+};
+
+const msalInstance = new msal.PublicClientApplication(msalConfig);
+const SCOPES = ["User.Read", "Sites.ReadWrite.All"];
+
+// ── Palette ───────────────────────────────────────────────────────────────
+const P = {
+  ink:"#0D1117", slate:"#1E293B", mid:"#475569", muted:"#94A3B8",
+  border:"#E2E8F0", bg:"#F1F5F9", white:"#FFFFFF",
+  blue:"#1D4ED8", blueLt:"#EFF6FF", blueBd:"#BFDBFE",
+  green:"#16A34A", greenLt:"#F0FDF4", greenBd:"#BBF7D0",
+  red:"#DC2626", redLt:"#FEF2F2", redBd:"#FECACA",
+  amber:"#D97706", amberLt:"#FFFBEB", amberBd:"#FDE68A",
+  purple:"#7C3AED", purpleLt:"#F5F3FF", purpleBd:"#DDD6FE",
+};
+
+const ROLE_COLORS = {
+  "Staff":          { bg:"#F0FDF4", color:"#166534", border:"#BBF7D0" },
+  "Team Leader":    { bg:"#EFF6FF", color:"#1D4ED8", border:"#BFDBFE" },
+  "Partner":        { bg:"#FFFBEB", color:"#92400E", border:"#FDE68A" },
+  "Senior Partner": { bg:"#F5F3FF", color:"#5B21B6", border:"#DDD6FE" },
+  "Admin":          { bg:"#FEF2F2", color:"#991B1B", border:"#FECACA" },
+  "Super Admin":    { bg:"#0D1117", color:"#F8FAFC", border:"#374151" },
+};
+
+// ── Graph API helpers ─────────────────────────────────────────────────────
+async function getToken() {
+  const accounts = msalInstance.getAllAccounts();
+  if (!accounts.length) throw new Error("Not signed in");
+  const resp = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: accounts[0] });
+  return resp.accessToken;
+}
+
+async function graphGet(url) {
+  const token = await getToken();
+  const r = await fetch(`https://graph.microsoft.com/v1.0${url}`, {
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+  });
+  if (!r.ok) throw new Error(`Graph API error: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+async function graphPost(url, body) {
+  const token = await getToken();
+  const r = await fetch(`https://graph.microsoft.com/v1.0${url}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error(`Graph API error: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+async function graphPatch(url, body) {
+  const token = await getToken();
+  const r = await fetch(`https://graph.microsoft.com/v1.0${url}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error(`Graph API error: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+async function graphDelete(url) {
+  const token = await getToken();
+  const r = await fetch(`https://graph.microsoft.com/v1.0${url}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!r.ok && r.status !== 204) throw new Error(`Graph API error: ${r.status}`);
+}
+
+// ── SharePoint List helpers ───────────────────────────────────────────────
+let SITE_ID = null;
+
+async function getSiteId() {
+  if (SITE_ID) return SITE_ID;
+  try {
+    const data = await graphGet(`/sites/${SP_SITE.replace("https://","")}${SP_SITE_REL}`);
+    SITE_ID = data.id;
+    return SITE_ID;
+  } catch {
+    // Site doesn't exist yet — use root site
+    const data = await graphGet(`/sites/${SP_SITE.replace("https://","")}`);
+    SITE_ID = data.id;
+    return SITE_ID;
+  }
+}
+
+async function ensureList(listName, columns) {
+  const siteId = await getSiteId();
+  try {
+    const data = await graphGet(`/sites/${siteId}/lists/${listName}`);
+    return data.id;
+  } catch {
+    // List doesn't exist — create it
+    const created = await graphPost(`/sites/${siteId}/lists`, {
+      displayName: listName,
+      list: { template: "genericList" },
+      columns: columns
+    });
+    return created.id;
+  }
+}
+
+async function getListItems(listName) {
+  const siteId = await getSiteId();
+  const data = await graphGet(`/sites/${siteId}/lists/${listName}/items?expand=fields&$top=999`);
+  return data.value.map(item => ({ id: item.id, ...item.fields }));
+}
+
+async function addListItem(listName, fields) {
+  const siteId = await getSiteId();
+  const data = await graphPost(`/sites/${siteId}/lists/${listName}/items`, { fields });
+  return { id: data.id, ...data.fields };
+}
+
+async function updateListItem(listName, itemId, fields) {
+  const siteId = await getSiteId();
+  return graphPatch(`/sites/${siteId}/lists/${listName}/items/${itemId}/fields`, fields);
+}
+
+async function deleteListItem(listName, itemId) {
+  const siteId = await getSiteId();
+  return graphDelete(`/sites/${siteId}/lists/${listName}/items/${itemId}`);
+}
+
+// ── List definitions ──────────────────────────────────────────────────────
+const LIST_DEFS = {
+  Clients: [
+    { name:"ClientName",  displayName:"Client Name",  text:{} },
+    { name:"ClientType",  displayName:"Client Type",  text:{} },
+    { name:"Status",      displayName:"Status",        text:{} },
+    { name:"Notes",       displayName:"Notes",         text:{} },
+  ],
+  Units: [
+    { name:"ClientName",  displayName:"Client Name",  text:{} },
+    { name:"UnitName",    displayName:"Unit Name",    text:{} },
+    { name:"AuditType",   displayName:"Audit Type",   text:{} },
+    { name:"Frequency",   displayName:"Frequency",    text:{} },
+    { name:"Status",      displayName:"Status",        text:{} },
+  ],
+  Users: [
+    { name:"Email",       displayName:"Email",         text:{} },
+    { name:"Role",        displayName:"Role",          text:{} },
+    { name:"Name",        displayName:"Name",          text:{} },
+    { name:"AssignedClients", displayName:"Assigned Clients", text:{} },
+    { name:"AssignedUnits",   displayName:"Assigned Units",   text:{} },
+    { name:"Status",      displayName:"Status",        text:{} },
+    { name:"AddedBy",     displayName:"Added By",      text:{} },
+    { name:"AddedOn",     displayName:"Added On",      text:{} },
+  ],
+  ClientAccess: [
+    { name:"ClientName",  displayName:"Client Name",  text:{} },
+    { name:"UnitName",    displayName:"Unit Name",    text:{} },
+    { name:"Email",       displayName:"Email",        text:{} },
+    { name:"AccessLevel", displayName:"Access Level", text:{} }, // MD / UnitHead / Specific
+    { name:"Status",      displayName:"Status",       text:{} },
+    { name:"AddedBy",     displayName:"Added By",     text:{} },
+    { name:"AddedOn",     displayName:"Added On",     text:{} },
+  ],
+  Reports: [
+    { name:"ClientName",  displayName:"Client Name",  text:{} },
+    { name:"UnitName",    displayName:"Unit Name",    text:{} },
+    { name:"FY",          displayName:"FY",           text:{} },
+    { name:"AuditType",   displayName:"Audit Type",   text:{} },
+    { name:"Status",      displayName:"Status",       text:{} }, // Draft / Live / Archived
+    { name:"UploadedBy",  displayName:"Uploaded By",  text:{} },
+    { name:"UploadedOn",  displayName:"Uploaded On",  text:{} },
+    { name:"AdditionalEmails", displayName:"Additional Emails", text:{} },
+    { name:"UDIN",        displayName:"UDIN",         text:{} },
+    { name:"Period",      displayName:"Period",       text:{} },
+  ],
+  AuditTrail: [
+    { name:"Action",      displayName:"Action",       text:{} },
+    { name:"PerformedBy", displayName:"Performed By", text:{} },
+    { name:"PerformedOn", displayName:"Performed On", text:{} },
+    { name:"Details",     displayName:"Details",      text:{} },
+    { name:"Section",     displayName:"Section",      text:{} },
+  ],
+};
+
+async function initializeLists() {
+  for (const [name, columns] of Object.entries(LIST_DEFS)) {
+    await ensureList(name, columns);
+  }
+}
+
+async function logAction(action, by, details, section) {
+  try {
+    await addListItem("AuditTrail", {
+      Action: action,
+      PerformedBy: by,
+      PerformedOn: new Date().toISOString(),
+      Details: details,
+      Section: section,
+    });
+  } catch { /* non-critical */ }
+}
+
+// ── UI Components ─────────────────────────────────────────────────────────
+const Btn = ({ children, onClick, color="blue", size="md", disabled, outline, full }) => {
+  const colors = {
+    blue:   { bg:P.blue,   text:"#fff", border:P.blue   },
+    green:  { bg:P.green,  text:"#fff", border:P.green  },
+    red:    { bg:P.red,    text:"#fff", border:P.red    },
+    gray:   { bg:"#F1F5F9",text:P.mid,  border:P.border },
+    amber:  { bg:P.amber,  text:"#fff", border:P.amber  },
+    purple: { bg:P.purple, text:"#fff", border:P.purple },
+  };
+  const c = colors[color] || colors.blue;
+  const pad = size==="sm" ? "5px 12px" : size==="lg" ? "12px 24px" : "8px 18px";
+  const fs  = size==="sm" ? 12 : size==="lg" ? 15 : 13;
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      background: outline ? "transparent" : (disabled ? "#E2E8F0" : c.bg),
+      color: outline ? c.bg : (disabled ? P.muted : c.text),
+      border: `1.5px solid ${disabled ? P.border : c.border}`,
+      borderRadius: 8, padding: pad, fontWeight: 700, fontSize: fs,
+      cursor: disabled ? "not-allowed" : "pointer",
+      width: full ? "100%" : "auto", transition: "opacity .15s",
+      opacity: disabled ? .6 : 1,
+    }}>{children}</button>
+  );
+};
+
+const Input = ({ label, value, onChange, placeholder, type="text", required, mono, readOnly, hint }) => (
+  <div>
+    {label && <label style={{ fontSize:11, fontWeight:700, color:P.muted, letterSpacing:.5, display:"block", marginBottom:5 }}>
+      {label} {required && <span style={{ color:P.red }}>*</span>}
+    </label>}
+    {hint && <div style={{ fontSize:11, color:P.muted, marginBottom:4 }}>{hint}</div>}
+    <input type={type} value={value} onChange={e => onChange?.(e.target.value)} placeholder={placeholder} readOnly={readOnly}
+      style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 11px", fontSize:13,
+        color:P.slate, outline:"none", fontFamily:mono?"monospace":"inherit",
+        background:readOnly?"#F8FAFC":P.white }} />
+  </div>
+);
+
+const Select = ({ label, value, onChange, options, required, placeholder }) => (
+  <div>
+    {label && <label style={{ fontSize:11, fontWeight:700, color:P.muted, letterSpacing:.5, display:"block", marginBottom:5 }}>
+      {label} {required && <span style={{ color:P.red }}>*</span>}
+    </label>}
+    <select value={value} onChange={e => onChange?.(e.target.value)}
+      style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 11px", fontSize:13,
+        color:value?P.slate:P.muted, outline:"none", background:P.white }}>
+      {placeholder && <option value="">{placeholder}</option>}
+      {options.map(o => <option key={o} value={o}>{o}</option>)}
+    </select>
+  </div>
+);
+
+const RoleBadge = ({ role }) => {
+  const c = ROLE_COLORS[role] || ROLE_COLORS["Staff"];
+  return <span style={{ background:c.bg, color:c.color, border:`1px solid ${c.border}`,
+    borderRadius:5, padding:"2px 9px", fontSize:11, fontWeight:700, whiteSpace:"nowrap" }}>{role}</span>;
+};
+
+const StatusBadge = ({ status }) => {
+  const map = { Active:{bg:P.greenLt,color:P.green,border:P.greenBd}, Inactive:{bg:P.redLt,color:P.red,border:P.redBd},
+    Live:{bg:P.greenLt,color:P.green,border:P.greenBd}, Draft:{bg:P.amberLt,color:P.amber,border:P.amberBd},
+    Archived:{bg:"#F1F5F9",color:P.mid,border:P.border} };
+  const c = map[status] || map.Active;
+  return <span style={{ background:c.bg, color:c.color, border:`1px solid ${c.border}`,
+    borderRadius:5, padding:"2px 9px", fontSize:11, fontWeight:700 }}>{status}</span>;
+};
+
+const Card = ({ title, subtitle, children, action }) => (
+  <div style={{ background:P.white, borderRadius:12, border:`1px solid ${P.border}`, padding:"22px", marginBottom:18 }}>
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16, paddingBottom:14, borderBottom:`1px solid ${P.border}` }}>
+      <div>
+        <div style={{ fontSize:15, fontWeight:800, color:P.slate }}>{title}</div>
+        {subtitle && <div style={{ fontSize:12, color:P.muted, marginTop:3 }}>{subtitle}</div>}
+      </div>
+      {action}
+    </div>
+    {children}
+  </div>
+);
+
+const Modal = ({ title, onClose, children }) => (
+  <div style={{ position:"fixed", inset:0, zIndex:60, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+    <div onClick={onClose} style={{ position:"absolute", inset:0, background:"rgba(15,23,42,.5)" }} />
+    <div style={{ position:"relative", background:P.white, borderRadius:14, padding:"28px", width:"100%", maxWidth:520, maxHeight:"85vh", overflowY:"auto", boxShadow:"0 20px 60px rgba(0,0,0,.2)" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:22 }}>
+        <div style={{ fontSize:16, fontWeight:800, color:P.slate }}>{title}</div>
+        <button onClick={onClose} style={{ background:"#F1F5F9", border:"none", borderRadius:7, width:32, height:32, cursor:"pointer", fontSize:16, color:P.muted }}>✕</button>
+      </div>
+      {children}
+    </div>
+  </div>
+);
+
+const Toast = ({ msg, type, onDone }) => {
+  useEffect(() => { const t = setTimeout(onDone, 3000); return () => clearTimeout(t); }, []);
+  const c = type==="error" ? {bg:P.redLt,color:P.red,border:P.redBd} : {bg:P.greenLt,color:P.green,border:P.greenBd};
+  return (
+    <div style={{ position:"fixed", bottom:24, right:24, zIndex:100, background:c.bg, color:c.color,
+      border:`1px solid ${c.border}`, borderRadius:10, padding:"12px 18px", fontSize:13, fontWeight:600,
+      boxShadow:"0 4px 20px rgba(0,0,0,.1)", maxWidth:360 }}>
+      {type==="error" ? "⛔ " : "✅ "}{msg}
+    </div>
+  );
+};
+
+// ── Section: Clients ──────────────────────────────────────────────────────
+function ClientsSection({ user, toast }) {
+  const [clients, setClients] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [form, setForm] = useState({ ClientName:"", ClientType:"", Status:"Active", Notes:"" });
+
+  const load = async () => {
+    setLoading(true);
+    try { setClients(await getListItems("Clients")); }
+    catch(e) { toast("Failed to load clients: "+e.message, "error"); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    if (!form.ClientName || !form.ClientType) { toast("Client name and type are required", "error"); return; }
+    try {
+      if (editItem) {
+        await updateListItem("Clients", editItem.id, form);
+        await logAction("Updated client", user.email, `Client: ${form.ClientName}`, "Clients");
+        toast("Client updated");
+      } else {
+        await addListItem("Clients", form);
+        await logAction("Added client", user.email, `Client: ${form.ClientName}`, "Clients");
+        toast("Client added");
+      }
+      setShowAdd(false); setEditItem(null); setForm({ ClientName:"", ClientType:"", Status:"Active", Notes:"" });
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const openEdit = item => {
+    setEditItem(item);
+    setForm({ ClientName:item.ClientName||"", ClientType:item.ClientType||"", Status:item.Status||"Active", Notes:item.Notes||"" });
+    setShowAdd(true);
+  };
+
+  const toggleStatus = async item => {
+    const newStatus = item.Status === "Active" ? "Inactive" : "Active";
+    try {
+      await updateListItem("Clients", item.id, { Status: newStatus });
+      await logAction(`${newStatus} client`, user.email, `Client: ${item.ClientName}`, "Clients");
+      toast(`Client ${newStatus.toLowerCase()}`);
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  return (
+    <Card title="Clients" subtitle={`${clients.length} clients`}
+      action={<Btn onClick={() => { setShowAdd(true); setEditItem(null); setForm({ ClientName:"", ClientType:"", Status:"Active", Notes:"" }); }}>+ Add Client</Btn>}>
+      {loading ? <div style={{ color:P.muted, fontSize:13 }}>Loading...</div> : (
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+          <thead>
+            <tr style={{ background:"#F8FAFC" }}>
+              {["Client Name","Type","Status","Actions"].map(h => (
+                <th key={h} style={{ padding:"9px 12px", textAlign:"left", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {clients.map((c,i) => (
+              <tr key={c.id} style={{ borderBottom:`1px solid ${P.border}`, background:i%2===0?P.white:"#FAFAFA" }}>
+                <td style={{ padding:"10px 12px", fontWeight:700, color:P.slate }}>{c.ClientName}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{c.ClientType}</td>
+                <td style={{ padding:"10px 12px" }}><StatusBadge status={c.Status||"Active"} /></td>
+                <td style={{ padding:"10px 12px" }}>
+                  <div style={{ display:"flex", gap:6 }}>
+                    <Btn size="sm" color="gray" onClick={() => openEdit(c)}>Edit</Btn>
+                    <Btn size="sm" color={c.Status==="Active"?"red":"green"} outline onClick={() => toggleStatus(c)}>
+                      {c.Status==="Active" ? "Deactivate" : "Activate"}
+                    </Btn>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {!clients.length && <tr><td colSpan={4} style={{ padding:"24px 12px", color:P.muted, textAlign:"center" }}>No clients yet. Add your first client.</td></tr>}
+          </tbody>
+        </table>
+      )}
+      {showAdd && (
+        <Modal title={editItem ? "Edit Client" : "Add Client"} onClose={() => { setShowAdd(false); setEditItem(null); }}>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <Input label="CLIENT NAME" value={form.ClientName} onChange={v => setForm(f=>({...f,ClientName:v}))} placeholder="e.g. SI Interpack Private Limited" required />
+            <Select label="CLIENT TYPE" value={form.ClientType} onChange={v => setForm(f=>({...f,ClientType:v}))} options={CLIENT_TYPES} required placeholder="Select type..." />
+            <Select label="STATUS" value={form.Status} onChange={v => setForm(f=>({...f,Status:v}))} options={["Active","Inactive"]} />
+            <Input label="NOTES" value={form.Notes} onChange={v => setForm(f=>({...f,Notes:v}))} placeholder="Optional notes" />
+            <div style={{ display:"flex", gap:10, marginTop:6 }}>
+              <Btn onClick={save} full>{editItem ? "Save Changes" : "Add Client"}</Btn>
+              <Btn color="gray" onClick={() => { setShowAdd(false); setEditItem(null); }}>Cancel</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+// ── Section: Units ────────────────────────────────────────────────────────
+function UnitsSection({ user, toast }) {
+  const [units, setUnits] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [filterClient, setFilterClient] = useState("");
+  const [form, setForm] = useState({ ClientName:"", UnitName:"", AuditType:"", Frequency:"", Status:"Active" });
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [u, c] = await Promise.all([getListItems("Units"), getListItems("Clients")]);
+      setUnits(u); setClients(c.filter(c=>c.Status!=="Inactive"));
+    } catch(e) { toast(e.message, "error"); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    if (!form.ClientName || !form.UnitName || !form.AuditType || !form.Frequency) { toast("All fields required", "error"); return; }
+    try {
+      if (editItem) {
+        await updateListItem("Units", editItem.id, form);
+        await logAction("Updated unit", user.email, `${form.ClientName} — ${form.UnitName}`, "Units");
+        toast("Unit updated");
+      } else {
+        await addListItem("Units", form);
+        await logAction("Added unit", user.email, `${form.ClientName} — ${form.UnitName}`, "Units");
+        toast("Unit added");
+      }
+      setShowAdd(false); setEditItem(null); setForm({ ClientName:"", UnitName:"", AuditType:"", Frequency:"", Status:"Active" });
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const filtered = filterClient ? units.filter(u => u.ClientName===filterClient) : units;
+
+  return (
+    <Card title="Units" subtitle={`${units.length} units across ${clients.length} clients`}
+      action={<Btn onClick={() => { setShowAdd(true); setEditItem(null); setForm({ ClientName:"", UnitName:"", AuditType:"", Frequency:"", Status:"Active" }); }}>+ Add Unit</Btn>}>
+      <div style={{ marginBottom:14 }}>
+        <Select value={filterClient} onChange={setFilterClient} options={clients.map(c=>c.ClientName)} placeholder="Filter by client..." />
+      </div>
+      {loading ? <div style={{ color:P.muted, fontSize:13 }}>Loading...</div> : (
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+          <thead>
+            <tr style={{ background:"#F8FAFC" }}>
+              {["Client","Unit","Audit Type","Frequency","Status",""].map(h => (
+                <th key={h} style={{ padding:"9px 12px", textAlign:"left", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((u,i) => (
+              <tr key={u.id} style={{ borderBottom:`1px solid ${P.border}`, background:i%2===0?P.white:"#FAFAFA" }}>
+                <td style={{ padding:"10px 12px", color:P.mid, fontSize:12 }}>{u.ClientName}</td>
+                <td style={{ padding:"10px 12px", fontWeight:700, color:P.slate }}>{u.UnitName}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{u.AuditType}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{u.Frequency}</td>
+                <td style={{ padding:"10px 12px" }}><StatusBadge status={u.Status||"Active"} /></td>
+                <td style={{ padding:"10px 12px" }}>
+                  <Btn size="sm" color="gray" onClick={() => { setEditItem(u); setForm({ ClientName:u.ClientName||"", UnitName:u.UnitName||"", AuditType:u.AuditType||"", Frequency:u.Frequency||"", Status:u.Status||"Active" }); setShowAdd(true); }}>Edit</Btn>
+                </td>
+              </tr>
+            ))}
+            {!filtered.length && <tr><td colSpan={6} style={{ padding:"24px 12px", color:P.muted, textAlign:"center" }}>No units found.</td></tr>}
+          </tbody>
+        </table>
+      )}
+      {showAdd && (
+        <Modal title={editItem ? "Edit Unit" : "Add Unit"} onClose={() => { setShowAdd(false); setEditItem(null); }}>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <Select label="CLIENT" value={form.ClientName} onChange={v => setForm(f=>({...f,ClientName:v}))} options={clients.map(c=>c.ClientName)} required placeholder="Select client..." />
+            <Input label="UNIT NAME" value={form.UnitName} onChange={v => setForm(f=>({...f,UnitName:v}))} placeholder="e.g. Hinjewadi" required />
+            <Select label="AUDIT TYPE" value={form.AuditType} onChange={v => setForm(f=>({...f,AuditType:v}))} options={AUDIT_TYPES} required placeholder="Select type..." />
+            <Select label="FREQUENCY" value={form.Frequency} onChange={v => setForm(f=>({...f,Frequency:v}))} options={FREQUENCIES} required placeholder="Select frequency..." />
+            <Select label="STATUS" value={form.Status} onChange={v => setForm(f=>({...f,Status:v}))} options={["Active","Inactive"]} />
+            <div style={{ display:"flex", gap:10, marginTop:6 }}>
+              <Btn onClick={save} full>{editItem ? "Save Changes" : "Add Unit"}</Btn>
+              <Btn color="gray" onClick={() => { setShowAdd(false); setEditItem(null); }}>Cancel</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+// ── Section: Staff Users ──────────────────────────────────────────────────
+function UsersSection({ user, toast }) {
+  const [users, setUsers] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editItem, setEditItem] = useState(null);
+  const [form, setForm] = useState({ Email:"", Name:"", Role:"Staff", AssignedClients:"", AssignedUnits:"", Status:"Active" });
+
+  // Role hierarchy — current user can only assign roles below their own level
+  const canAssignRole = role => ROLE_LEVEL[role] < ROLE_LEVEL[user.role];
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [u, c] = await Promise.all([getListItems("Users"), getListItems("Clients")]);
+      setUsers(u); setClients(c.filter(c=>c.Status!=="Inactive"));
+    } catch(e) { toast(e.message, "error"); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    if (!form.Email || !form.Role) { toast("Email and role are required", "error"); return; }
+    if (!form.Email.includes("@")) { toast("Invalid email address", "error"); return; }
+    if (!canAssignRole(form.Role)) { toast("You cannot assign this role — insufficient permissions", "error"); return; }
+    try {
+      const payload = { ...form, AddedBy: user.email, AddedOn: new Date().toISOString() };
+      if (editItem) {
+        await updateListItem("Users", editItem.id, payload);
+        await logAction("Updated user", user.email, `${form.Email} — ${form.Role}`, "Users");
+        toast("User updated");
+      } else {
+        await addListItem("Users", payload);
+        await logAction("Added user", user.email, `${form.Email} — ${form.Role}`, "Users");
+        toast("User added");
+      }
+      setShowAdd(false); setEditItem(null); setForm({ Email:"", Name:"", Role:"Staff", AssignedClients:"", AssignedUnits:"", Status:"Active" });
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const toggleStatus = async u => {
+    const ns = u.Status==="Active" ? "Inactive" : "Active";
+    try {
+      await updateListItem("Users", u.id, { Status: ns });
+      await logAction(`${ns} user`, user.email, u.Email, "Users");
+      toast(`User ${ns.toLowerCase()}`);
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const assignableRoles = ROLES.filter(r => canAssignRole(r));
+
+  return (
+    <Card title="Staff & Access" subtitle={`${users.length} users`}
+      action={<Btn onClick={() => { setShowAdd(true); setEditItem(null); setForm({ Email:"", Name:"", Role:"Staff", AssignedClients:"", AssignedUnits:"", Status:"Active" }); }}>+ Add User</Btn>}>
+      {loading ? <div style={{ color:P.muted, fontSize:13 }}>Loading...</div> : (
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+          <thead>
+            <tr style={{ background:"#F8FAFC" }}>
+              {["Name / Email","Role","Assigned To","Status","Actions"].map(h => (
+                <th key={h} style={{ padding:"9px 12px", textAlign:"left", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((u,i) => (
+              <tr key={u.id} style={{ borderBottom:`1px solid ${P.border}`, background:i%2===0?P.white:"#FAFAFA" }}>
+                <td style={{ padding:"10px 12px" }}>
+                  <div style={{ fontWeight:700, color:P.slate }}>{u.Name||"—"}</div>
+                  <div style={{ fontSize:11, color:P.muted }}>{u.Email}</div>
+                </td>
+                <td style={{ padding:"10px 12px" }}><RoleBadge role={u.Role} /></td>
+                <td style={{ padding:"10px 12px", fontSize:11, color:P.mid, maxWidth:180 }}>
+                  {u.AssignedClients ? <div>{u.AssignedClients}</div> : <span style={{ color:P.muted }}>All clients</span>}
+                </td>
+                <td style={{ padding:"10px 12px" }}><StatusBadge status={u.Status||"Active"} /></td>
+                <td style={{ padding:"10px 12px" }}>
+                  <div style={{ display:"flex", gap:6 }}>
+                    {canAssignRole(u.Role) && <Btn size="sm" color="gray" onClick={() => { setEditItem(u); setForm({ Email:u.Email||"", Name:u.Name||"", Role:u.Role||"Staff", AssignedClients:u.AssignedClients||"", AssignedUnits:u.AssignedUnits||"", Status:u.Status||"Active" }); setShowAdd(true); }}>Edit</Btn>}
+                    {canAssignRole(u.Role) && <Btn size="sm" color={u.Status==="Active"?"red":"green"} outline onClick={() => toggleStatus(u)}>
+                      {u.Status==="Active" ? "Revoke" : "Restore"}
+                    </Btn>}
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {!users.length && <tr><td colSpan={5} style={{ padding:"24px 12px", color:P.muted, textAlign:"center" }}>No users yet.</td></tr>}
+          </tbody>
+        </table>
+      )}
+      {showAdd && (
+        <Modal title={editItem ? "Edit User" : "Add User"} onClose={() => { setShowAdd(false); setEditItem(null); }}>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <Input label="EMAIL" value={form.Email} onChange={v => setForm(f=>({...f,Email:v}))} placeholder="staff@ncls.in" required type="email" />
+            <Input label="FULL NAME" value={form.Name} onChange={v => setForm(f=>({...f,Name:v}))} placeholder="e.g. Muskan Bansal" />
+            <Select label="ROLE" value={form.Role} onChange={v => setForm(f=>({...f,Role:v}))} options={assignableRoles} required placeholder="Select role..." />
+            <div>
+              <label style={{ fontSize:11, fontWeight:700, color:P.muted, letterSpacing:.5, display:"block", marginBottom:5 }}>ASSIGNED CLIENTS</label>
+              <div style={{ fontSize:11, color:P.muted, marginBottom:5 }}>Leave blank for all clients. Comma-separate multiple.</div>
+              <input value={form.AssignedClients} onChange={e => setForm(f=>({...f,AssignedClients:e.target.value}))}
+                placeholder="e.g. SI Interpack, New Swan"
+                style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 11px", fontSize:13, color:P.slate, outline:"none" }} />
+            </div>
+            <div>
+              <label style={{ fontSize:11, fontWeight:700, color:P.muted, letterSpacing:.5, display:"block", marginBottom:5 }}>ASSIGNED UNITS</label>
+              <div style={{ fontSize:11, color:P.muted, marginBottom:5 }}>Leave blank for all units of assigned clients.</div>
+              <input value={form.AssignedUnits} onChange={e => setForm(f=>({...f,AssignedUnits:e.target.value}))}
+                placeholder="e.g. Hinjewadi, Chakan"
+                style={{ width:"100%", border:`1px solid ${P.border}`, borderRadius:7, padding:"9px 11px", fontSize:13, color:P.slate, outline:"none" }} />
+            </div>
+            <Select label="STATUS" value={form.Status} onChange={v => setForm(f=>({...f,Status:v}))} options={["Active","Inactive"]} />
+            <div style={{ display:"flex", gap:10, marginTop:6 }}>
+              <Btn onClick={save} full>{editItem ? "Save Changes" : "Add User"}</Btn>
+              <Btn color="gray" onClick={() => { setShowAdd(false); setEditItem(null); }}>Cancel</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+// ── Section: Client Access ────────────────────────────────────────────────
+function ClientAccessSection({ user, toast }) {
+  const [access, setAccess] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [units, setUnits] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [filterClient, setFilterClient] = useState("");
+  const [form, setForm] = useState({ ClientName:"", UnitName:"All Units", Email:"", AccessLevel:"MD", Status:"Active" });
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [a, c, u] = await Promise.all([getListItems("ClientAccess"), getListItems("Clients"), getListItems("Units")]);
+      setAccess(a); setClients(c.filter(c=>c.Status!=="Inactive")); setUnits(u);
+    } catch(e) { toast(e.message, "error"); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const filteredUnits = units.filter(u => u.ClientName===form.ClientName);
+  const filteredAccess = filterClient ? access.filter(a=>a.ClientName===filterClient) : access;
+
+  const save = async () => {
+    if (!form.ClientName || !form.Email || !form.AccessLevel) { toast("All fields required", "error"); return; }
+    try {
+      await addListItem("ClientAccess", { ...form, AddedBy:user.email, AddedOn:new Date().toISOString() });
+      await logAction("Added client access", user.email, `${form.Email} → ${form.ClientName} / ${form.UnitName} (${form.AccessLevel})`, "ClientAccess");
+      toast("Access granted");
+      setShowAdd(false); setForm({ ClientName:"", UnitName:"All Units", Email:"", AccessLevel:"MD", Status:"Active" });
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const revoke = async item => {
+    try {
+      await updateListItem("ClientAccess", item.id, { Status:"Inactive" });
+      await logAction("Revoked client access", user.email, `${item.Email} → ${item.ClientName}`, "ClientAccess");
+      toast("Access revoked");
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const ACCESS_LEVELS = ["MD","Unit Head","Specific Report"];
+
+  return (
+    <Card title="Client & Management Access" subtitle="Control who can view the client dashboard"
+      action={<Btn onClick={() => setShowAdd(true)}>+ Grant Access</Btn>}>
+      <div style={{ marginBottom:14 }}>
+        <Select value={filterClient} onChange={setFilterClient} options={clients.map(c=>c.ClientName)} placeholder="Filter by client..." />
+      </div>
+      {loading ? <div style={{ color:P.muted, fontSize:13 }}>Loading...</div> : (
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+          <thead>
+            <tr style={{ background:"#F8FAFC" }}>
+              {["Email","Client","Unit","Access Level","Status",""].map(h => (
+                <th key={h} style={{ padding:"9px 12px", textAlign:"left", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {filteredAccess.map((a,i) => (
+              <tr key={a.id} style={{ borderBottom:`1px solid ${P.border}`, background:i%2===0?P.white:"#FAFAFA" }}>
+                <td style={{ padding:"10px 12px", color:P.slate, fontWeight:600 }}>{a.Email}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{a.ClientName}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{a.UnitName||"All Units"}</td>
+                <td style={{ padding:"10px 12px" }}>
+                  <span style={{ background:P.purpleLt, color:P.purple, border:`1px solid ${P.purpleBd}`, borderRadius:5, padding:"2px 9px", fontSize:11, fontWeight:700 }}>{a.AccessLevel}</span>
+                </td>
+                <td style={{ padding:"10px 12px" }}><StatusBadge status={a.Status||"Active"} /></td>
+                <td style={{ padding:"10px 12px" }}>
+                  {a.Status==="Active" && <Btn size="sm" color="red" outline onClick={() => revoke(a)}>Revoke</Btn>}
+                </td>
+              </tr>
+            ))}
+            {!filteredAccess.length && <tr><td colSpan={6} style={{ padding:"24px 12px", color:P.muted, textAlign:"center" }}>No access records found.</td></tr>}
+          </tbody>
+        </table>
+      )}
+      {showAdd && (
+        <Modal title="Grant Dashboard Access" onClose={() => setShowAdd(false)}>
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <Input label="EMAIL ADDRESS" value={form.Email} onChange={v => setForm(f=>({...f,Email:v}))} placeholder="md@client.com" required type="email" hint="Person who will receive OTP to log in to the client dashboard" />
+            <Select label="CLIENT" value={form.ClientName} onChange={v => setForm(f=>({...f,ClientName:v,UnitName:"All Units"}))} options={clients.map(c=>c.ClientName)} required placeholder="Select client..." />
+            <Select label="UNIT" value={form.UnitName}
+              onChange={v => setForm(f=>({...f,UnitName:v}))}
+              options={["All Units", ...filteredUnits.map(u=>u.UnitName)]}
+              placeholder="Select unit..." />
+            <Select label="ACCESS LEVEL" value={form.AccessLevel} onChange={v => setForm(f=>({...f,AccessLevel:v}))} options={ACCESS_LEVELS} required
+              hint="MD = full dashboard, Unit Head = that unit only, Specific Report = one report only" />
+            <div style={{ display:"flex", gap:10, marginTop:6 }}>
+              <Btn onClick={save} full>Grant Access</Btn>
+              <Btn color="gray" onClick={() => setShowAdd(false)}>Cancel</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+// ── Section: Reports ──────────────────────────────────────────────────────
+function ReportsSection({ user, toast }) {
+  const [reports, setReports] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [extraEmail, setExtraEmail] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    try { setReports(await getListItems("Reports")); }
+    catch(e) { toast(e.message, "error"); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const setStatus = async (report, status) => {
+    try {
+      await updateListItem("Reports", report.id, { Status: status });
+      await logAction(`Report ${status}`, user.email, `${report.ClientName} — ${report.UnitName} FY${report.FY}`, "Reports");
+      toast(`Report set to ${status}`);
+      load();
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const addEmail = async () => {
+    if (!extraEmail || !extraEmail.includes("@")) { toast("Valid email required", "error"); return; }
+    const current = selected.AdditionalEmails ? selected.AdditionalEmails.split(",").map(e=>e.trim()).filter(Boolean) : [];
+    if (current.includes(extraEmail)) { toast("Email already added", "error"); return; }
+    const updated = [...current, extraEmail].join(", ");
+    try {
+      await updateListItem("Reports", selected.id, { AdditionalEmails: updated });
+      await logAction("Added email to report", user.email, `${extraEmail} → ${selected.ClientName}/${selected.UnitName}`, "Reports");
+      toast("Email added");
+      setExtraEmail("");
+      load();
+      setSelected(r => ({ ...r, AdditionalEmails: updated }));
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  const removeEmail = async email => {
+    const current = selected.AdditionalEmails.split(",").map(e=>e.trim()).filter(e=>e && e!==email);
+    const updated = current.join(", ");
+    try {
+      await updateListItem("Reports", selected.id, { AdditionalEmails: updated });
+      await logAction("Removed email from report", user.email, `${email} from ${selected.ClientName}/${selected.UnitName}`, "Reports");
+      toast("Email removed");
+      load();
+      setSelected(r => ({ ...r, AdditionalEmails: updated }));
+    } catch(e) { toast(e.message, "error"); }
+  };
+
+  return (
+    <Card title="Reports" subtitle={`${reports.length} reports uploaded`}>
+      {loading ? <div style={{ color:P.muted, fontSize:13 }}>Loading...</div> : (
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+          <thead>
+            <tr style={{ background:"#F8FAFC" }}>
+              {["Client / Unit","FY","Audit Type","Status","Uploaded By","Actions"].map(h => (
+                <th key={h} style={{ padding:"9px 12px", textAlign:"left", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {reports.map((r,i) => (
+              <tr key={r.id} style={{ borderBottom:`1px solid ${P.border}`, background:i%2===0?P.white:"#FAFAFA" }}>
+                <td style={{ padding:"10px 12px" }}>
+                  <div style={{ fontWeight:700, color:P.slate }}>{r.ClientName}</div>
+                  <div style={{ fontSize:11, color:P.muted }}>{r.UnitName}</div>
+                </td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{r.FY}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{r.AuditType}</td>
+                <td style={{ padding:"10px 12px" }}><StatusBadge status={r.Status||"Draft"} /></td>
+                <td style={{ padding:"10px 12px", fontSize:11, color:P.muted }}>{r.UploadedBy}</td>
+                <td style={{ padding:"10px 12px" }}>
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                    {r.Status!=="Live"     && <Btn size="sm" color="green" onClick={() => setStatus(r,"Live")}>Go Live</Btn>}
+                    {r.Status==="Live"     && <Btn size="sm" color="amber" outline onClick={() => setStatus(r,"Draft")}>Unpublish</Btn>}
+                    {r.Status!=="Archived" && <Btn size="sm" color="gray" onClick={() => setStatus(r,"Archived")}>Archive</Btn>}
+                    <Btn size="sm" color="purple" outline onClick={() => setSelected(r)}>Manage Access</Btn>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {!reports.length && <tr><td colSpan={6} style={{ padding:"24px 12px", color:P.muted, textAlign:"center" }}>No reports uploaded yet.</td></tr>}
+          </tbody>
+        </table>
+      )}
+      {selected && (
+        <Modal title={`Report Access — ${selected.ClientName} / ${selected.UnitName}`} onClose={() => setSelected(null)}>
+          <div style={{ marginBottom:16 }}>
+            <div style={{ fontSize:12, fontWeight:700, color:P.muted, marginBottom:10 }}>ADDITIONAL EMAIL ACCESS</div>
+            <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+              <input value={extraEmail} onChange={e => setExtraEmail(e.target.value)} placeholder="email@domain.com"
+                onKeyDown={e => e.key==="Enter" && addEmail()}
+                style={{ flex:1, border:`1px solid ${P.border}`, borderRadius:7, padding:"8px 10px", fontSize:13, outline:"none" }} />
+              <Btn onClick={addEmail}>Add</Btn>
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {selected.AdditionalEmails ? selected.AdditionalEmails.split(",").map(e=>e.trim()).filter(Boolean).map(email => (
+                <div key={email} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:P.blueLt, borderRadius:7, padding:"8px 12px" }}>
+                  <span style={{ fontSize:13, color:P.blue, fontWeight:600 }}>{email}</span>
+                  <Btn size="sm" color="red" outline onClick={() => removeEmail(email)}>Remove</Btn>
+                </div>
+              )) : <div style={{ fontSize:12, color:P.muted }}>No additional emails. Inherited from client access settings.</div>}
+            </div>
+          </div>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+// ── Section: Audit Trail ──────────────────────────────────────────────────
+function AuditTrailSection({ toast }) {
+  const [trail, setTrail] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("");
+
+  useEffect(async () => {
+    setLoading(true);
+    try { setTrail(await getListItems("AuditTrail")); }
+    catch(e) { toast(e.message, "error"); }
+    setLoading(false);
+  }, []);
+
+  const filtered = filter ? trail.filter(t => t.Section===filter) : trail;
+  const sorted = [...filtered].sort((a,b) => new Date(b.PerformedOn)-new Date(a.PerformedOn));
+  const sections = ["Clients","Units","Users","ClientAccess","Reports"];
+
+  const fmtDate = s => { try { return new Date(s).toLocaleString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}); } catch{return s||"—";} };
+
+  return (
+    <Card title="Audit Trail" subtitle="Complete log of all admin actions">
+      <div style={{ marginBottom:14 }}>
+        <Select value={filter} onChange={setFilter} options={sections} placeholder="Filter by section..." />
+      </div>
+      {loading ? <div style={{ color:P.muted, fontSize:13 }}>Loading...</div> : (
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {sorted.slice(0,100).map((t,i) => (
+            <div key={t.id||i} style={{ display:"flex", gap:12, alignItems:"flex-start", background:i%2===0?P.white:"#FAFAFA", borderRadius:8, padding:"10px 12px", border:`1px solid ${P.border}` }}>
+              <div style={{ width:6, height:6, borderRadius:"50%", background:P.blue, flexShrink:0, marginTop:6 }} />
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:600, color:P.slate }}>{t.Action}</div>
+                <div style={{ fontSize:11, color:P.muted, marginTop:2 }}>{t.Details}</div>
+              </div>
+              <div style={{ textAlign:"right", flexShrink:0 }}>
+                <div style={{ fontSize:11, color:P.mid, fontWeight:600 }}>{t.PerformedBy}</div>
+                <div style={{ fontSize:10, color:P.muted, marginTop:2 }}>{fmtDate(t.PerformedOn)}</div>
+              </div>
+            </div>
+          ))}
+          {!sorted.length && <div style={{ padding:"24px 0", color:P.muted, textAlign:"center", fontSize:13 }}>No actions logged yet.</div>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────
+function App() {
+  const [user, setUser]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [initDone, setInitDone] = useState(false);
+  const [activeTab, setActiveTab] = useState("clients");
+  const [toast, setToast]     = useState(null);
+  const [initError, setInitError] = useState("");
+
+  const showToast = (msg, type="success") => setToast({ msg, type });
+
+  // Handle MSAL redirect response on page load
+  useEffect(async () => {
+    try {
+      await msalInstance.initialize();
+      const response = await msalInstance.handleRedirectPromise();
+      if (response) {
+        const email = response.account.username;
+        const role = email === SUPER_ADMIN ? "Super Admin" : "Admin";
+        setUser({ email, name: response.account.name, role });
+      } else {
+        const accounts = msalInstance.getAllAccounts();
+        if (accounts.length) {
+          const email = accounts[0].username;
+          const role = email === SUPER_ADMIN ? "Super Admin" : "Admin";
+          setUser({ email, name: accounts[0].name, role });
+        }
+      }
+    } catch(e) { console.error("MSAL init error:", e); }
+    setLoading(false);
+  }, []);
+
+  // Initialize SharePoint lists once signed in
+  useEffect(async () => {
+    if (!user || initDone) return;
+    try {
+      await initializeLists();
+      setInitDone(true);
+    } catch(e) {
+      setInitError("Could not connect to SharePoint. Check permissions. Error: " + e.message);
+    }
+  }, [user]);
+
+  const signIn = async () => {
+    try {
+      await msalInstance.loginRedirect({ scopes: SCOPES });
+    } catch(e) { showToast("Sign in failed: "+e.message, "error"); }
+  };
+
+  const signOut = () => {
+    msalInstance.logoutRedirect();
+  };
+
+  const TABS = [
+    { id:"clients",  label:"Clients",        icon:"🏢" },
+    { id:"units",    label:"Units",           icon:"🏭" },
+    { id:"users",    label:"Staff & Roles",   icon:"👥" },
+    { id:"access",   label:"Client Access",   icon:"🔑" },
+    { id:"reports",  label:"Reports",         icon:"📋" },
+    { id:"trail",    label:"Audit Trail",     icon:"📜" },
+  ];
+
+  if (loading) return (
+    <div style={{ minHeight:"100vh", background:P.ink, display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <div style={{ color:"#9CA3AF", fontSize:14 }}>Loading...</div>
+    </div>
+  );
+
+  if (!user) return (
+    <div style={{ minHeight:"100vh", background:P.ink, display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}>
+      <div style={{ width:"100%", maxWidth:420, textAlign:"center" }}>
+        <div style={{ display:"inline-flex", alignItems:"center", gap:10, marginBottom:32 }}>
+          <div style={{ width:44, height:44, background:P.blue, borderRadius:12, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, fontWeight:900, color:"#fff" }}>N</div>
+          <div style={{ textAlign:"left" }}>
+            <div style={{ fontWeight:800, color:"#F8FAFC", fontSize:17 }}>NCLS & Associates</div>
+            <div style={{ fontSize:12, color:P.muted }}>Admin Portal</div>
+          </div>
+        </div>
+        <div style={{ background:"#1C2333", borderRadius:16, padding:"36px 32px", border:"1px solid #2D3748", marginBottom:20 }}>
+          <div style={{ fontSize:22, fontWeight:800, color:"#F8FAFC", marginBottom:8 }}>Admin Sign In</div>
+          <div style={{ fontSize:13, color:P.muted, marginBottom:28 }}>Sign in with your Microsoft 365 account. Access is restricted to authorized admins only.</div>
+          <button onClick={signIn} style={{ width:"100%", background:"#fff", color:"#1E293B", border:"none", borderRadius:10, padding:"13px 0", fontWeight:700, fontSize:14, display:"flex", alignItems:"center", justifyContent:"center", gap:10, cursor:"pointer" }}>
+            <svg width="18" height="18" viewBox="0 0 21 21">
+              <rect x="1" y="1" width="9" height="9" fill="#F25022"/>
+              <rect x="11" y="1" width="9" height="9" fill="#7FBA00"/>
+              <rect x="1" y="11" width="9" height="9" fill="#00A4EF"/>
+              <rect x="11" y="11" width="9" height="9" fill="#FFB900"/>
+            </svg>
+            Sign in with Microsoft
+          </button>
+        </div>
+        <div style={{ fontSize:11, color:"#374151" }}>Only authorized admin accounts can access this portal.</div>
+      </div>
+    </div>
+  );
+
+  if (initError) return (
+    <div style={{ minHeight:"100vh", background:P.bg, display:"flex", alignItems:"center", justifyContent:"center", padding:24 }}>
+      <div style={{ background:P.redLt, border:`1px solid ${P.redBd}`, borderRadius:14, padding:"32px", maxWidth:520, textAlign:"center" }}>
+        <div style={{ fontSize:32, marginBottom:12 }}>⛔</div>
+        <div style={{ fontSize:17, fontWeight:800, color:P.red, marginBottom:8 }}>SharePoint Connection Failed</div>
+        <div style={{ fontSize:13, color:"#991B1B", marginBottom:20 }}>{initError}</div>
+        <Btn color="red" outline onClick={signOut}>Sign Out & Retry</Btn>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight:"100vh", background:P.bg }}>
+      {/* Top bar */}
+      <div style={{ background:P.ink, padding:"0 28px", position:"sticky", top:0, zIndex:50 }}>
+        <div style={{ maxWidth:1300, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", height:56 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <div style={{ width:32, height:32, background:P.blue, borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", fontSize:15, fontWeight:900, color:"#fff" }}>N</div>
+            <span style={{ fontWeight:800, color:"#F8FAFC", fontSize:15 }}>NCLS & Associates</span>
+            <span style={{ color:"#374151" }}>·</span>
+            <span style={{ fontSize:13, color:"#9CA3AF" }}>Admin Portal</span>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+            <RoleBadge role={user.role} />
+            <span style={{ fontSize:12, color:"#6B7280" }}>{user.name || user.email}</span>
+            <button onClick={signOut} style={{ background:"#1C2333", color:"#9CA3AF", border:"1px solid #2D3748", borderRadius:7, padding:"5px 12px", fontSize:12, fontWeight:600, cursor:"pointer" }}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ background:P.white, borderBottom:`1px solid ${P.border}`, padding:"0 28px", overflowX:"auto" }}>
+        <div style={{ maxWidth:1300, margin:"0 auto", display:"flex" }}>
+          {TABS.map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
+              background:"transparent", border:"none", padding:"14px 18px",
+              fontWeight: activeTab===tab.id ? 800 : 500, fontSize:13,
+              color: activeTab===tab.id ? P.blue : P.muted,
+              borderBottom: activeTab===tab.id ? `3px solid ${P.blue}` : "3px solid transparent",
+              cursor:"pointer", whiteSpace:"nowrap", display:"flex", alignItems:"center", gap:6, transition:"all .15s"
+            }}>
+              <span>{tab.icon}</span>{tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{ maxWidth:1300, margin:"0 auto", padding:"28px 28px" }}>
+        {activeTab==="clients" && <ClientsSection user={user} toast={showToast} />}
+        {activeTab==="units"   && <UnitsSection   user={user} toast={showToast} />}
+        {activeTab==="users"   && <UsersSection   user={user} toast={showToast} />}
+        {activeTab==="access"  && <ClientAccessSection user={user} toast={showToast} />}
+        {activeTab==="reports" && <ReportsSection user={user} toast={showToast} />}
+        {activeTab==="trail"   && <AuditTrailSection toast={showToast} />}
+      </div>
+
+      {toast && <Toast msg={toast.msg} type={toast.type} onDone={() => setToast(null)} />}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+<script>
+  window.addEventListener('error', function(e) {
+    const r = document.getElementById('root');
+    if (r && !r.hasChildNodes())
+      r.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#DC2626;background:#FEF2F2;border-radius:12px;margin:40px auto;max-width:500px;border:1px solid #FECACA"><h2>Portal failed to load</h2><p>' + (e.message||'Unknown error') + '</p></div>';
+  });
+  const src = document.getElementById('app-source').textContent;
+  const out = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+  const s = document.createElement('script'); s.textContent = out; document.body.appendChild(s);
+</script>
+</body>
+</html>
