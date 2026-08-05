@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NCLS & Associates — Staff Portal</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #F1F5F9; min-height: 100vh; }
+  button, input, select, textarea { font-family: inherit; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/plain" id="app-source">
+const { useState, useRef, useEffect, useCallback } = React;
+
+const SB_URL = "https://mkdsiwrkwrwwkhseunjl.supabase.co";
+const SB_KEY = "sb_publishable_w50vP_IpYA4wHKQZ2A7mNg_mKtL-Wzx";
+const sb = supabase.createClient(SB_URL, SB_KEY);
+const SUPER_ADMIN = "ashishgupta151084@gmail.com";
+
+const P = {
+  ink:"#0D1117", slate:"#1E293B", mid:"#475569", muted:"#94A3B8",
+  border:"#E2E8F0", bg:"#F1F5F9", white:"#FFFFFF",
+  blue:"#1D4ED8", blueLt:"#EFF6FF", blueBd:"#BFDBFE",
+  green:"#16A34A", greenLt:"#F0FDF4", greenBd:"#BBF7D0",
+  red:"#DC2626", redLt:"#FEF2F2", redBd:"#FECACA",
+  amber:"#D97706", amberLt:"#FFFBEB", amberBd:"#FDE68A",
+};
+
+const PERMISSIONS = ["approve_reports","upload_reports","manage_masters","manage_users","manage_access","view_trail"];
+const ROLE_DEFAULT_PERMS = {
+  "Staff":{upload_reports:true},
+  "Team Leader":{upload_reports:true,view_trail:true},
+  "Partner":{approve_reports:true,upload_reports:true,manage_masters:true,manage_users:true,manage_access:true,view_trail:true},
+  "Senior Partner":{approve_reports:true,upload_reports:true,manage_masters:true,manage_users:true,manage_access:true,view_trail:true},
+  "Admin":{approve_reports:true,upload_reports:true,manage_masters:true,manage_users:true,manage_access:true,view_trail:true},
+  "Super Admin":{approve_reports:true,upload_reports:true,manage_masters:true,manage_users:true,manage_access:true,view_trail:true},
+};
+const defaultPerms = role => { const d={}; PERMISSIONS.forEach(k=>d[k]=!!(ROLE_DEFAULT_PERMS[role]||{})[k]); return d; };
+const effectivePerms = (role, custom) => custom && typeof custom==="object" ? { ...defaultPerms(role), ...custom } : defaultPerms(role);
+
+function readableError(err) {
+  const raw = (err && (err.message || err.error_description || err.msg)) || "";
+  const status = err && err.status;
+  if (status === 429 || /rate limit|too many/i.test(raw)) return "Too many attempts. Please wait a minute and try again.";
+  if (status === 500 || /unexpected_failure/i.test(raw)) return "Email could not be sent (server error). Contact the administrator.";
+  if (/expired|invalid/i.test(raw)) return "That code is invalid or expired. Request a new one.";
+  return raw || "Something went wrong. Please try again.";
+}
+
+// ── JSON validation ───────────────────────────────────────────────────────
+function validateJSON(json) {
+  const errors = [], warnings = [];
+  if (!json.report_metadata)  errors.push("Missing section: report_metadata");
+  if (!json.audit_summary)    errors.push("Missing section: audit_summary");
+  if (!Array.isArray(json.areas)) errors.push("Missing section: areas (must be an array)");
+
+  if (json.report_metadata) {
+    const m = json.report_metadata;
+    ["client_name","unit_name","fy","audit_period_from","audit_period_to"].forEach(k=>{
+      if (!m[k]) errors.push(`report_metadata.${k} is missing`);
+    });
+    if (!m.udin)             warnings.push("UDIN not found in JSON — please verify");
+    if (!m.overall_rating)   warnings.push("overall_rating not found in JSON");
+    if (!m.auditors?.length) warnings.push("Auditor names not found in JSON");
+  }
+  if (json.audit_summary?.area_wise_summary) {
+    json.audit_summary.area_wise_summary.forEach(row=>{
+      const sum=(row.critical||0)+(row.high||0)+(row.medium||0)+(row.low||0);
+      if (sum!==row.total) errors.push(`Area "${row.area}": risk counts sum to ${sum} but total says ${row.total}`);
+    });
+  }
+  if (Array.isArray(json.areas)) {
+    json.areas.forEach(area=>{
+      if (!area.area_name) errors.push("An area is missing area_name");
+      (area.observations||[]).forEach((obs,i)=>{
+        if (!obs.title) warnings.push(`${area.area_name} obs #${i+1}: missing title`);
+        if (!obs.risk_level) errors.push(`${area.area_name} obs #${i+1}: missing risk_level`);
+        else if (!["Critical","High","Medium","Low"].includes(obs.risk_level))
+          errors.push(`${area.area_name} obs #${i+1}: invalid risk_level "${obs.risk_level}"`);
+      });
+    });
+  }
+  return { errors, warnings, clarifications: json.clarifications_needed || [] };
+}
+
+// ── UI bits ───────────────────────────────────────────────────────────────
+const Btn = ({ children, onClick, color="blue", size="md", disabled, outline, full }) => {
+  const C={blue:{bg:P.blue,t:"#fff",b:P.blue},green:{bg:P.green,t:"#fff",b:P.green},red:{bg:P.red,t:"#fff",b:P.red},
+    gray:{bg:"#F1F5F9",t:P.mid,b:P.border},amber:{bg:P.amber,t:"#fff",b:P.amber}};
+  const c=C[color]||C.blue; const pad=size==="sm"?"5px 12px":size==="lg"?"12px 24px":"9px 18px";
+  return <button onClick={onClick} disabled={disabled} style={{
+    background:outline?"transparent":(disabled?"#E2E8F0":c.bg),color:outline?c.bg:(disabled?P.muted:c.t),
+    border:`1.5px solid ${disabled?P.border:c.b}`,borderRadius:8,padding:pad,fontWeight:700,
+    fontSize:size==="sm"?12:13,cursor:disabled?"not-allowed":"pointer",width:full?"100%":"auto",opacity:disabled?.6:1}}>{children}</button>;
+};
+const Sel = ({ label, value, onChange, options, required, placeholder, hint, disabled }) => (
+  <div>
+    {label&&<label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:5}}>{label}{required&&<span style={{color:P.red}}> *</span>}</label>}
+    {hint&&<div style={{fontSize:11,color:P.muted,marginBottom:4}}>{hint}</div>}
+    <select value={value} onChange={e=>onChange?.(e.target.value)} disabled={disabled}
+      style={{width:"100%",border:`1px solid ${P.border}`,borderRadius:7,padding:"9px 11px",fontSize:13,
+        color:value?P.slate:P.muted,outline:"none",background:disabled?"#F8FAFC":P.white}}>
+      {placeholder&&<option value="">{placeholder}</option>}
+      {options.map(o=><option key={typeof o==="object"?o.value:o} value={typeof o==="object"?o.value:o}>{typeof o==="object"?o.label:o}</option>)}
+    </select>
+  </div>
+);
+const StatusBadge = ({ status }) => {
+  const m={Live:{bg:P.greenLt,c:P.green,b:P.greenBd},Draft:{bg:P.amberLt,c:P.amber,b:P.amberBd},
+    Rejected:{bg:P.redLt,c:P.red,b:P.redBd},Archived:{bg:"#F1F5F9",c:P.mid,b:P.border}};
+  const s=m[status]||m.Draft;
+  const label = status==="Draft" ? "Awaiting approval" : status;
+  return <span style={{background:s.bg,color:s.c,border:`1px solid ${s.b}`,borderRadius:5,padding:"2px 9px",fontSize:11,fontWeight:700}}>{label}</span>;
+};
+const Toast = ({ msg, type, onDone }) => {
+  useEffect(()=>{const t=setTimeout(onDone,3500);return()=>clearTimeout(t);},[]);
+  const c=type==="error"?{bg:P.redLt,color:P.red,border:P.redBd}:{bg:P.greenLt,color:P.green,border:P.greenBd};
+  return <div style={{position:"fixed",bottom:24,right:24,zIndex:100,background:c.bg,color:c.color,border:`1px solid ${c.border}`,
+    borderRadius:10,padding:"12px 18px",fontSize:13,fontWeight:600,boxShadow:"0 4px 20px rgba(0,0,0,.1)",maxWidth:360}}>
+    {type==="error"?"⛔ ":"✅ "}{msg}</div>;
+};
+const MetaField = ({ label, value, mono }) => (
+  <div>
+    <div style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:4}}>{label}</div>
+    <div style={{background:value?P.greenLt:P.bg,border:`1px solid ${value?P.greenBd:P.border}`,borderRadius:7,
+      padding:"9px 12px",fontSize:13,color:value?P.slate:P.muted,fontFamily:mono?"monospace":"inherit",
+      fontWeight:value?600:400,minHeight:38}}>
+      {value || <span style={{color:P.muted,fontSize:12}}>Auto-filled from JSON</span>}
+    </div>
+  </div>
+);
+function FileDropZone({ label, accept, file, onFile, required, hint, tag }) {
+  const [drag,setDrag]=useState(false); const ref=useRef();
+  const ext=file?.name?.split(".").pop()?.toUpperCase();
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+        <label style={{fontSize:12,fontWeight:700,color:P.mid,letterSpacing:.5}}>{label}{required&&<span style={{color:P.red}}> *</span>}</label>
+        {tag&&<span style={{fontSize:10,fontWeight:700,background:P.blueLt,color:P.blue,borderRadius:4,padding:"1px 7px"}}>{tag}</span>}
+      </div>
+      {hint&&<div style={{fontSize:11,color:P.muted,marginBottom:6}}>{hint}</div>}
+      <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
+        onDrop={e=>{e.preventDefault();setDrag(false);const f=e.dataTransfer.files[0];if(f)onFile(f);}}
+        onClick={()=>ref.current.click()}
+        style={{border:`2px dashed ${drag?P.blue:file?P.green:P.border}`,borderRadius:10,padding:"16px 14px",
+          textAlign:"center",background:drag?P.blueLt:file?P.greenLt:P.white,cursor:"pointer"}}>
+        <input ref={ref} type="file" accept={accept} style={{display:"none"}} onChange={e=>onFile(e.target.files[0])}/>
+        {file?(
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+            <span style={{background:P.green,color:"#fff",borderRadius:5,padding:"2px 8px",fontSize:11,fontWeight:700}}>{ext}</span>
+            <span style={{fontSize:13,fontWeight:600,color:P.green}}>{file.name}</span>
+            <span style={{fontSize:11,color:P.muted}}>({(file.size/1024).toFixed(0)} KB)</span>
+          </div>
+        ):(
+          <>
+            <div style={{fontSize:20,marginBottom:4,color:P.muted}}>📎</div>
+            <div style={{fontSize:13,color:P.mid,fontWeight:600}}>Drop here or click to select</div>
+            <div style={{fontSize:11,color:P.muted,marginTop:2}}>{accept}</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── LOGIN ─────────────────────────────────────────────────────────────────
+function LoginScreen() {
+  const [email,setEmail]=useState(""); const [code,setCode]=useState("");
+  const [step,setStep]=useState("email"); const [busy,setBusy]=useState(false); const [error,setError]=useState("");
+  const send=async()=>{ setError("");
+    const em=email.trim().toLowerCase();
+    if(!em.includes("@")){setError("Enter a valid email address.");return;}
+    setBusy(true);
+    const {error:err}=await sb.auth.signInWithOtp({email:em,options:{shouldCreateUser:true}});
+    setBusy(false); if(err){setError(readableError(err));return;} setStep("code");
+  };
+  const verify=async()=>{ setError("");
+    if(code.trim().length<6){setError("Enter the code from your email.");return;}
+    setBusy(true);
+    const {error:err}=await sb.auth.verifyOtp({email:email.trim().toLowerCase(),token:code.trim(),type:"email"});
+    setBusy(false); if(err){setError(readableError(err));return;}
+  };
+  return (
+    <div style={{minHeight:"100vh",background:P.ink,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{width:"100%",maxWidth:420}}>
+        <div style={{textAlign:"center",marginBottom:36}}>
+          <div style={{display:"inline-flex",alignItems:"center",gap:10,marginBottom:16}}>
+            <div style={{width:40,height:40,background:P.blue,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,fontWeight:900,color:"#fff"}}>N</div>
+            <div style={{textAlign:"left"}}>
+              <div style={{fontWeight:800,color:"#F8FAFC",fontSize:16}}>NCLS & Associates</div>
+              <div style={{fontSize:11,color:P.muted}}>Chartered Accountants</div>
+            </div>
+          </div>
+          <div style={{fontSize:22,fontWeight:800,color:"#F8FAFC",marginBottom:6}}>Staff Portal</div>
+          <div style={{fontSize:13,color:P.muted}}>Sign in with your email — a code will be sent to you</div>
+        </div>
+        <div style={{background:"#1C2333",borderRadius:16,padding:"32px 28px",border:"1px solid #2D3748"}}>
+          {step==="email"?(
+            <>
+              <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>EMAIL ADDRESS</label>
+              <input value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder="you@ncls.in" autoFocus
+                style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:14,outline:"none",marginBottom:8}}/>
+              {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
+              <button onClick={send} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginTop:6,cursor:"pointer"}}>
+                {busy?"Sending code...":"Send One-Time Code →"}
+              </button>
+            </>
+          ):(
+            <>
+              <div style={{fontSize:13,color:P.muted,marginBottom:18}}>Code sent to <strong style={{color:"#93C5FD"}}>{email}</strong>. Check your inbox and spam.</div>
+              <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>SIGN-IN CODE</label>
+              <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,8))} onKeyDown={e=>e.key==="Enter"&&verify()}
+                placeholder="Enter code" autoFocus maxLength={8}
+                style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:22,fontWeight:800,letterSpacing:6,textAlign:"center",outline:"none",marginBottom:8}}/>
+              {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
+              <button onClick={verify} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginBottom:12,cursor:"pointer"}}>
+                {busy?"Verifying...":"Verify & Sign In →"}
+              </button>
+              <div style={{textAlign:"center",fontSize:12}}>
+                <span onClick={()=>{setStep("email");setCode("");setError("");}} style={{color:"#93C5FD",cursor:"pointer"}}>← Change email / resend</span>
+              </div>
+            </>
+          )}
+        </div>
+        <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"#374151"}}>Access limited to staff authorized by the administrator.</div>
+      </div>
+    </div>
+  );
+}
+
+// ── UPLOAD FORM ───────────────────────────────────────────────────────────
+function UploadForm({ user, clients, assignments, units, onUploaded, showToast }) {
+  const [clientName,setClientName]=useState("");
+  const [assignmentId,setAssignmentId]=useState("");
+  const [unitId,setUnitId]=useState("");
+  const [fy,setFy]=useState("");
+  const [jsonFile,setJsonFile]=useState(null);
+  const [reportFile,setReportFile]=useState(null);
+  const [annexureFile,setAnnexureFile]=useState(null);
+  const [jsonData,setJsonData]=useState(null);
+  const [meta,setMeta]=useState(null);
+  const [result,setResult]=useState(null);
+  const [answers,setAnswers]=useState({});
+  const [step,setStep]=useState("form");
+
+  const myAssignments = assignments.filter(a=>a.client_name===clientName && a.status==="Active");
+  const myUnits = units.filter(u=>u.client_name===clientName && String(u.assignment_id)===String(assignmentId) && u.status!=="Inactive");
+
+  const handleJson = useCallback(file=>{
+    setJsonFile(file); setResult(null); setJsonData(null); setMeta(null);
+    const r=new FileReader();
+    r.onload=e=>{
+      try{
+        const d=JSON.parse(e.target.result.trim()); setJsonData(d);
+        const m=d.report_metadata||{};
+        if(!fy && m.fy) setFy(m.fy);
+        setMeta({ periodFrom:m.audit_period_from||"", periodTo:m.audit_period_to||"",
+          auditors:Array.isArray(m.auditors)?m.auditors.join(", "):(m.auditors||""),
+          udin:m.udin||"", rating:m.overall_rating||"" });
+      }catch(err){ setResult({errors:[`Invalid JSON: ${err.message}`],warnings:[],clarifications:[]}); }
+    };
+    r.readAsText(file);
+  },[fy]);
+
+  const canValidate = clientName&&assignmentId&&unitId&&fy&&jsonData&&reportFile;
+
+  const runValidation=()=>{ setStep("validating");
+    setTimeout(()=>{ setResult(validateJSON(jsonData)); setAnswers({}); setStep("validated"); },600);
+  };
+
+  const submit=async()=>{
+    setStep("submitting");
+    try{
+      const unit = units.find(u=>String(u.id)===String(unitId));
+      const stamp = Date.now();
+      const safe = s => (s||"").replace(/[^a-zA-Z0-9._-]/g,"_");
+      let reportPath=null, annexPath=null;
+
+      if (reportFile) {
+        reportPath = `${safe(clientName)}/${safe(unit?.unit_name)}/${fy}/${stamp}_${safe(reportFile.name)}`;
+        const { error } = await sb.storage.from("reports").upload(reportPath, reportFile, { upsert:false });
+        if (error) throw new Error("Report upload failed: "+error.message);
+      }
+      if (annexureFile) {
+        annexPath = `${safe(clientName)}/${safe(unit?.unit_name)}/${fy}/${stamp}_annex_${safe(annexureFile.name)}`;
+        const { error } = await sb.storage.from("reports").upload(annexPath, annexureFile, { upsert:false });
+        if (error) throw new Error("Annexure upload failed: "+error.message);
+      }
+
+      const payload = {
+        client_name: clientName,
+        unit_id: parseInt(unitId),
+        unit_name: unit?.unit_name || "",
+        assignment_id: parseInt(assignmentId),
+        fy,
+        status: "Draft",
+        uploaded_by: user.email,
+        period: meta ? `${meta.periodFrom||""}${meta.periodFrom&&meta.periodTo?" – ":""}${meta.periodTo||""}` : "",
+        udin: meta?.udin || "",
+        report_json: { ...jsonData, _clarification_answers: answers },
+        report_file: reportPath,
+        annexure_file: annexPath,
+      };
+      const { error } = await sb.from("reports").insert(payload);
+      if (error) throw new Error(error.message);
+
+      await sb.from("audit_trail").insert({ action:"Uploaded report (awaiting approval)", performed_by:user.email,
+        details:`${clientName} — ${unit?.unit_name} FY${fy}`, section:"Reports" });
+
+      setStep("success"); onUploaded();
+    }catch(e){ showToast(e.message,"error"); setStep("validated"); }
+  };
+
+  const reset=()=>{ setClientName("");setAssignmentId("");setUnitId("");setFy("");
+    setJsonFile(null);setReportFile(null);setAnnexureFile(null);setJsonData(null);setMeta(null);
+    setResult(null);setAnswers({});setStep("form"); };
+
+  const fmtDate=s=>{ if(!s)return""; try{return new Date(s).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});}catch{return s;} };
+
+  if (step==="success") return (
+    <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"48px 24px",textAlign:"center"}}>
+      <div style={{width:68,height:68,background:P.amberLt,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 18px"}}>⏳</div>
+      <h2 style={{fontSize:20,fontWeight:800,color:P.slate,marginBottom:8}}>Submitted for approval</h2>
+      <p style={{fontSize:13,color:P.mid,marginBottom:8,lineHeight:1.6}}>
+        The report has been uploaded and is now <strong>awaiting approval</strong>.<br/>
+        It will appear on the client dashboard only once an approver publishes it.
+      </p>
+      <p style={{fontSize:12,color:P.muted,marginBottom:26}}>You can track its status under "My Uploads" below.</p>
+      <Btn onClick={reset} size="lg">Upload another report</Btn>
+    </div>
+  );
+
+  const clientOptions = clients.map(c=>c.client_name);
+
+  return (
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"start"}}>
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        {/* Step 1 */}
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
+          <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:16,paddingBottom:12,borderBottom:`1px solid ${P.border}`,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{background:P.blue,color:"#fff",width:22,height:22,borderRadius:6,fontSize:11,fontWeight:900,display:"inline-flex",alignItems:"center",justifyContent:"center"}}>1</span>
+            Select Report
+          </div>
+          {!clientOptions.length ? (
+            <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:8,padding:"12px 14px",fontSize:12,color:P.amber}}>
+              No clients are assigned to you yet. Ask the administrator to assign clients in the admin portal.
+            </div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              <Sel label="CLIENT" value={clientName} onChange={v=>{setClientName(v);setAssignmentId("");setUnitId("");}} options={clientOptions} required placeholder="Select client..."/>
+              <Sel label="ASSIGNMENT" value={assignmentId} onChange={v=>{setAssignmentId(v);setUnitId("");}} disabled={!clientName} required placeholder="Select assignment..."
+                options={myAssignments.map(a=>({value:String(a.id),label:`${a.assignment_type}${a.fy?" — FY "+a.fy:""}${a.details?" ("+a.details+")":""}`}))}/>
+              <Sel label="UNIT" value={unitId} onChange={setUnitId} disabled={!assignmentId} required placeholder="Select unit..."
+                options={myUnits.map(u=>({value:String(u.id),label:u.unit_name}))}/>
+              <Sel label="FINANCIAL YEAR" value={fy} onChange={setFy} options={["2023-24","2024-25","2025-26","2026-27"]} required placeholder="Select FY..."/>
+            </div>
+          )}
+        </div>
+
+        {/* Step 2 */}
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
+          <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:16,paddingBottom:12,borderBottom:`1px solid ${P.border}`,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{background:P.blue,color:"#fff",width:22,height:22,borderRadius:6,fontSize:11,fontWeight:900,display:"inline-flex",alignItems:"center",justifyContent:"center"}}>2</span>
+            Upload JSON
+          </div>
+          <FileDropZone label="Structured JSON File" accept=".json" file={jsonFile} onFile={handleJson} required
+            hint="Generated by the staff prompt template via Claude / ChatGPT"/>
+          {meta&&(
+            <div style={{marginTop:16,paddingTop:16,borderTop:`1px solid ${P.border}`}}>
+              <div style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:10}}>📋 METADATA FROM JSON — AUTO-FILLED</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <MetaField label="PERIOD FROM" value={fmtDate(meta.periodFrom)}/>
+                <MetaField label="PERIOD TO" value={fmtDate(meta.periodTo)}/>
+              </div>
+              <div style={{marginTop:10}}><MetaField label="AUDITORS" value={meta.auditors}/></div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:10}}>
+                <MetaField label="UDIN" value={meta.udin} mono/>
+                <MetaField label="OVERALL RATING" value={meta.rating}/>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Step 3 */}
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
+          <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:16,paddingBottom:12,borderBottom:`1px solid ${P.border}`,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{background:P.blue,color:"#fff",width:22,height:22,borderRadius:6,fontSize:11,fontWeight:900,display:"inline-flex",alignItems:"center",justifyContent:"center"}}>3</span>
+            Upload Files
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <FileDropZone label="Audit Report" accept=".pdf,.pptx,.ppt" file={reportFile} onFile={setReportFile} required tag="MD Download"
+              hint="Original report PDF or PPTX — available for the MD to download from the dashboard"/>
+            <FileDropZone label="Annexure File" accept=".pdf,.xlsx,.xls,.csv" file={annexureFile} onFile={setAnnexureFile} tag="Optional"
+              hint="Skip if annexures are already part of the report PDF"/>
+          </div>
+        </div>
+      </div>
+
+      {/* RIGHT */}
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
+          <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${P.border}`}}>✅ Validate & Submit</div>
+          <div style={{marginBottom:18}}>
+            {[
+              {label:"Client, assignment & unit selected",done:!!clientName&&!!assignmentId&&!!unitId},
+              {label:"Financial year selected",done:!!fy},
+              {label:"JSON uploaded & parsed",done:!!jsonData},
+              {label:"Metadata auto-filled",done:!!meta?.periodFrom},
+              {label:"Audit report uploaded",done:!!reportFile},
+            ].map(it=>(
+              <div key={it.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <div style={{width:18,height:18,borderRadius:"50%",flexShrink:0,background:it.done?P.greenLt:P.bg,
+                  border:`1.5px solid ${it.done?P.green:P.border}`,display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:11,color:it.done?P.green:P.muted}}>{it.done?"✓":""}</div>
+                <span style={{fontSize:12,color:it.done?P.slate:P.muted,fontWeight:it.done?600:400}}>{it.label}</span>
+              </div>
+            ))}
+          </div>
+
+          {step==="form"&&<Btn onClick={runValidation} disabled={!canValidate} full>
+            {canValidate?"Validate JSON →":"Complete steps first"}</Btn>}
+          {step==="validating"&&<div style={{textAlign:"center",padding:"18px 0",color:P.muted,fontSize:13}}>Validating JSON...</div>}
+          {step==="submitting"&&<div style={{textAlign:"center",padding:"18px 0",color:P.green,fontSize:13,fontWeight:600}}>Uploading files and submitting...</div>}
+
+          {step==="validated"&&result&&(
+            <div>
+              {result.errors.length>0&&(
+                <div style={{background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
+                  <div style={{fontWeight:800,color:P.red,fontSize:13,marginBottom:8}}>⛔ {result.errors.length} error{result.errors.length>1?"s":""} — cannot submit</div>
+                  {result.errors.map((e,i)=><div key={i} style={{fontSize:12,color:"#991B1B",marginBottom:4,paddingLeft:10,borderLeft:`2px solid ${P.red}`}}>• {e}</div>)}
+                  <Btn size="sm" color="red" outline onClick={()=>{setJsonFile(null);setJsonData(null);setMeta(null);setResult(null);setStep("form");}}>← Re-upload corrected JSON</Btn>
+                </div>
+              )}
+              {result.warnings.length>0&&(
+                <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
+                  <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:8}}>⚠️ {result.warnings.length} warning{result.warnings.length>1?"s":""}</div>
+                  {result.warnings.map((w,i)=><div key={i} style={{fontSize:12,color:"#92400E",marginBottom:4,paddingLeft:10,borderLeft:`2px solid ${P.amber}`}}>• {w}</div>)}
+                </div>
+              )}
+              {result.clarifications.length>0&&(
+                <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
+                  <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:10}}>🤖 {result.clarifications.length} item{result.clarifications.length>1?"s":""} flagged by AI</div>
+                  {result.clarifications.map((c,i)=>(
+                    <div key={i} style={{background:"#fff",borderRadius:8,padding:"10px 12px",marginBottom:8,border:`1px solid ${P.amberBd}`}}>
+                      <div style={{fontSize:11,fontWeight:700,color:P.amber,marginBottom:4}}>FIELD: {c.field}</div>
+                      <div style={{fontSize:12,color:"#78350F",marginBottom:6}}>{c.question}</div>
+                      <input placeholder={`AI value: ${c.extracted_value} — type correction or leave blank`}
+                        value={answers[i]||""} onChange={e=>setAnswers(a=>({...a,[i]:e.target.value}))}
+                        style={{width:"100%",border:`1px solid ${answers[i]?P.green:P.amberBd}`,borderRadius:7,padding:"7px 10px",fontSize:12,outline:"none"}}/>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!result.errors.length&&(
+                <>
+                  <div style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12}}>
+                    <div style={{fontWeight:800,color:P.green,fontSize:13}}>✅ JSON validated</div>
+                    <div style={{fontSize:12,color:"#166534",marginTop:2}}>Submitting sends this for approval — it won't be visible to the client until approved.</div>
+                  </div>
+                  <Btn onClick={submit} color="green" full size="lg">Submit for Approval →</Btn>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
+          <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${P.border}`}}>📖 How to prepare the JSON</div>
+          {["Open the Staff Prompt Template document","Copy the full prompt into Claude or ChatGPT",
+            "Attach the report PPTX or PDF to the chat","Save the AI output as a .json file",
+            "Upload it here — the portal validates automatically"].map((t,i)=>(
+            <div key={i} style={{display:"flex",gap:10,marginBottom:10,alignItems:"flex-start"}}>
+              <div style={{width:22,height:22,background:P.blueLt,color:P.blue,borderRadius:6,fontSize:11,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>{i+1}</div>
+              <span style={{fontSize:13,color:P.mid,lineHeight:1.5}}>{t}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MY UPLOADS ────────────────────────────────────────────────────────────
+function MyUploads({ reports }) {
+  if (!reports.length) return null;
+  const fmt=s=>{try{return new Date(s).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});}catch{return"";}};
+  return (
+    <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px",marginTop:20}}>
+      <div style={{fontSize:14,fontWeight:800,color:P.slate,marginBottom:16,paddingBottom:12,borderBottom:`1px solid ${P.border}`}}>
+        📤 My Uploads <span style={{fontSize:12,fontWeight:500,color:P.muted}}>— {reports.length} report{reports.length>1?"s":""}</span>
+      </div>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+        <thead><tr>{["Client / Unit","FY","Status","Uploaded"].map(h=>
+          <th key={h} style={{padding:"9px 12px",textAlign:"left",color:P.muted,fontSize:11,fontWeight:700,borderBottom:`2px solid ${P.border}`,background:"#F8FAFC"}}>{h}</th>)}
+        </tr></thead>
+        <tbody>
+          {reports.map((r,i)=>(
+            <React.Fragment key={r.id}>
+              <tr style={{borderBottom:r.rejected_reason?"none":`1px solid ${P.border}`,background:i%2===0?P.white:"#FAFAFA"}}>
+                <td style={{padding:"10px 12px"}}>
+                  <div style={{fontWeight:700,color:P.slate}}>{r.client_name}</div>
+                  <div style={{fontSize:11,color:P.muted}}>{r.unit_name}</div>
+                </td>
+                <td style={{padding:"10px 12px",color:P.mid}}>{r.fy}</td>
+                <td style={{padding:"10px 12px"}}><StatusBadge status={r.status}/></td>
+                <td style={{padding:"10px 12px",fontSize:11,color:P.muted}}>{fmt(r.created_at)}</td>
+              </tr>
+              {r.status==="Rejected"&&r.rejected_reason&&(
+                <tr style={{borderBottom:`1px solid ${P.border}`,background:P.redLt}}>
+                  <td colSpan={4} style={{padding:"8px 12px",fontSize:12,color:"#991B1B"}}>
+                    <strong>Rejected:</strong> {r.rejected_reason} — please correct and upload again.
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── APP ───────────────────────────────────────────────────────────────────
+function App() {
+  const [authState,setAuthState]=useState("loading");
+  const [user,setUser]=useState(null);
+  const [clients,setClients]=useState([]);
+  const [assignments,setAssignments]=useState([]);
+  const [units,setUnits]=useState([]);
+  const [myReports,setMyReports]=useState([]);
+  const [toast,setToast]=useState(null);
+  const showToast=(msg,type="success")=>setToast({msg,type});
+
+  const loadData = async (u) => {
+    try{
+      const [{data:cl},{data:asg},{data:un}] = await Promise.all([
+        sb.from("clients").select("*").eq("status","Active").order("client_name"),
+        sb.from("assignments").select("*").order("id"),
+        sb.from("units").select("*").order("unit_name"),
+      ]);
+      const allowed = u.assignedClients?.length ? u.assignedClients : null;
+      setClients((cl||[]).filter(c=>!allowed||allowed.includes(c.client_name)));
+      setAssignments((asg||[]).filter(a=>!allowed||allowed.includes(a.client_name)));
+      setUnits((un||[]).filter(x=>!allowed||allowed.includes(x.client_name)));
+      const {data:rep}=await sb.from("reports").select("*").eq("uploaded_by",u.email).order("id",{ascending:false});
+      setMyReports(rep||[]);
+    }catch(e){ showToast("Could not load data: "+e.message,"error"); }
+  };
+
+  const resolveUser = async (sess) => {
+    const email=sess?.user?.email?.toLowerCase();
+    if(!email){ setAuthState("login"); return; }
+    if(email===SUPER_ADMIN){
+      const u={email,name:"Ashish Gupta",role:"Super Admin",perms:defaultPerms("Super Admin"),assignedClients:[]};
+      setUser(u); setAuthState("ready"); await loadData(u); return;
+    }
+    const {data,error}=await sb.from("app_users").select("*").eq("email",email).eq("status","Active").maybeSingle();
+    if(error||!data){ setAuthState("denied"); return; }
+    const perms=effectivePerms(data.role,data.permissions);
+    if(!perms.upload_reports){ setAuthState("denied"); return; }
+    const u={email,name:data.name||email,role:data.role,perms,assignedClients:data.assigned_clients||[]};
+    setUser(u); setAuthState("ready"); await loadData(u);
+  };
+
+  useEffect(()=>{
+    sb.auth.getSession().then(({data})=>{ if(data.session) resolveUser(data.session); else setAuthState("login"); });
+    const {data:sub}=sb.auth.onAuthStateChange((_e,sess)=>{ if(sess) resolveUser(sess); else {setUser(null);setAuthState("login");} });
+    return ()=>sub.subscription.unsubscribe();
+  },[]);
+
+  const signOut=async()=>{ await sb.auth.signOut(); };
+
+  if(authState==="loading") return <div style={{minHeight:"100vh",background:P.ink,display:"flex",alignItems:"center",justifyContent:"center",color:"#9CA3AF",fontSize:14}}>Loading...</div>;
+  if(authState==="login") return <LoginScreen/>;
+  if(authState==="denied") return (
+    <div style={{minHeight:"100vh",background:P.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:14,padding:"32px",maxWidth:480,textAlign:"center"}}>
+        <div style={{fontSize:32,marginBottom:12}}>🔒</div>
+        <div style={{fontSize:17,fontWeight:800,color:P.red,marginBottom:8}}>Not Authorized</div>
+        <div style={{fontSize:13,color:"#991B1B",marginBottom:20}}>
+          Your email is verified but you do not have upload rights. Ask the administrator to add you in the admin portal.
+        </div>
+        <Btn color="red" outline onClick={signOut}>Sign out</Btn>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",background:P.bg}}>
+      <div style={{background:P.ink,padding:"0 28px",position:"sticky",top:0,zIndex:50}}>
+        <div style={{maxWidth:1200,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between",height:54}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:30,height:30,background:P.blue,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:900,color:"#fff"}}>N</div>
+            <span style={{fontWeight:800,color:"#F8FAFC",fontSize:14}}>NCLS & Associates</span>
+            <span style={{color:"#374151"}}>·</span>
+            <span style={{fontSize:13,color:"#9CA3AF"}}>Staff Portal</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <span style={{fontSize:12,color:"#6B7280"}}>{user.name} · {user.role}</span>
+            <button onClick={signOut} style={{background:"#1C2333",color:"#9CA3AF",border:"1px solid #2D3748",borderRadius:7,padding:"5px 12px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Sign out</button>
+          </div>
+        </div>
+      </div>
+      <div style={{maxWidth:1200,margin:"0 auto",padding:"28px"}}>
+        <div style={{marginBottom:22}}>
+          <h1 style={{fontSize:22,fontWeight:900,color:P.slate,marginBottom:4}}>Upload Audit Report</h1>
+          <p style={{fontSize:13,color:P.muted}}>Select the report, upload the JSON and files, validate, then submit for approval.</p>
+        </div>
+        <UploadForm user={user} clients={clients} assignments={assignments} units={units}
+          onUploaded={()=>loadData(user)} showToast={showToast}/>
+        <MyUploads reports={myReports}/>
+      </div>
+      {toast&&<Toast msg={toast.msg} type={toast.type} onDone={()=>setToast(null)}/>}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+<script>
+  window.addEventListener('error', function(e) {
+    const r = document.getElementById('root');
+    if (r && !r.hasChildNodes())
+      r.innerHTML = '<div style="padding:40px;font-family:sans-serif;color:#DC2626;background:#FEF2F2;border-radius:12px;margin:40px auto;max-width:500px;border:1px solid #FECACA"><h2>Portal failed to load</h2><p>' + (e.message||'Unknown error') + '</p></div>';
+  });
+  const src = document.getElementById('app-source').textContent;
+  const out = Babel.transform(src, { presets: [['react', { runtime: 'classic' }]] }).code;
+  const s = document.createElement('script'); s.textContent = out; document.body.appendChild(s);
+</script>
+</body>
+</html>
