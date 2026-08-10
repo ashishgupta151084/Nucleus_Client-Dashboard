@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NCLS & Associates — Client Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif; background:#F1F5F9; min-height:100vh; }
+  button,input,select { font-family:inherit; }
+  ::-webkit-scrollbar { width:6px; } ::-webkit-scrollbar-thumb { background:#CBD5E1; border-radius:3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/plain" id="app-source">
+const { useState, useEffect } = React;
+const { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } = Recharts;
+
+const SB_URL="https://mkdsiwrkwrwwkhseunjl.supabase.co";
+const SB_KEY="sb_publishable_w50vP_IpYA4wHKQZ2A7mNg_mKtL-Wzx";
+const sb = supabase.createClient(SB_URL, SB_KEY);
+
+const P={ink:"#0D1117",slate:"#1E293B",mid:"#475569",muted:"#94A3B8",border:"#E2E8F0",bg:"#F1F5F9",white:"#FFFFFF",
+  blue:"#1D4ED8",blueLt:"#EFF6FF",blueBd:"#BFDBFE",green:"#16A34A",greenLt:"#F0FDF4",greenBd:"#BBF7D0",
+  red:"#DC2626",redLt:"#FEF2F2",redBd:"#FECACA",amber:"#D97706",amberLt:"#FFFBEB",amberBd:"#FDE68A"};
+const RISK={Critical:"#DC2626",High:"#EA580C",Medium:"#D97706",Low:"#16A34A"};
+const RISK_ORDER = ["Critical","High","Medium","Low"];
+const ROOT_CAUSE_COLORS = [P.blue, P.purple, P.amber, "#0D9488", P.red, P.muted];
+
+function RiskDonut({ risk, size=220 }) {
+  const data = RISK_ORDER.map(k => ({ name:k, value: risk[k.toLowerCase()]||0 })).filter(d=>d.value>0);
+  if (!data.length) return <div style={{ fontSize:12, color:P.muted, textAlign:"center", padding:"40px 0" }}>No risk data</div>;
+  return (
+    <ResponsiveContainer width="100%" height={size}>
+      <PieChart>
+        <Pie data={data} dataKey="value" nameKey="name" innerRadius="52%" outerRadius="82%" paddingAngle={2}>
+          {data.map((d,i) => <Cell key={i} fill={RISK[d.name]} />)}
+        </Pie>
+        <Tooltip/>
+        <Legend verticalAlign="bottom" height={30} iconType="circle" wrapperStyle={{fontSize:12}}/>
+      </PieChart>
+    </ResponsiveContainer>
+  );
+}
+
+function RootCauseDonut({ rootCauseRollup, size=220 }) {
+  if (!rootCauseRollup || !rootCauseRollup.length) return <div style={{ fontSize:12, color:P.muted, textAlign:"center", padding:"40px 0" }}>No root cause data</div>;
+  return (
+    <ResponsiveContainer width="100%" height={size}>
+      <PieChart>
+        <Pie data={rootCauseRollup} dataKey="value" nameKey="name" innerRadius="52%" outerRadius="82%" paddingAngle={2}>
+          {rootCauseRollup.map((d,i) => <Cell key={i} fill={ROOT_CAUSE_COLORS[i % ROOT_CAUSE_COLORS.length]} />)}
+        </Pie>
+        <Tooltip/>
+        <Legend verticalAlign="bottom" height={40} iconType="circle" wrapperStyle={{fontSize:11}}/>
+      </PieChart>
+    </ResponsiveContainer>
+  );
+}
+
+function UnitBarChart({ units, size=280 }) {
+  if (!units || !units.length) return null;
+  const data = units.map(u => ({ name:u.unitName, Critical:u.critical, High:u.high, Medium:u.medium, Low:u.low }));
+  return (
+    <ResponsiveContainer width="100%" height={size}>
+      <BarChart data={data} margin={{ top:10, right:10, left:0, bottom:10 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9"/>
+        <XAxis dataKey="name" tick={{fontSize:11}}/>
+        <YAxis tick={{fontSize:11}} allowDecimals={false}/>
+        <Tooltip/>
+        <Legend wrapperStyle={{fontSize:12}}/>
+        <Bar dataKey="Critical" stackId="a" fill={RISK.Critical}/>
+        <Bar dataKey="High" stackId="a" fill={RISK.High}/>
+        <Bar dataKey="Medium" stackId="a" fill={RISK.Medium}/>
+        <Bar dataKey="Low" stackId="a" fill={RISK.Low}/>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ── Build a consolidated (company-level) summary from a set of reports ────
+function buildConsolidated(reports) {
+  const totals = { critical:0, high:0, medium:0, low:0 };
+  const units = [];
+  const areaMap = {};
+  const limitationsMap = {};
+  const repeatedByUnit = {};
+  const rootCauseMap = {};
+
+  reports.forEach(r => {
+    const j = r.report_json || {};
+    const risk = j.audit_summary?.observation_count_by_risk || {};
+    const c=risk.critical||0, h=risk.high||0, m=risk.medium||0, l=risk.low||0;
+    totals.critical+=c; totals.high+=h; totals.medium+=m; totals.low+=l;
+
+    let repeatedCount=0, newCount=0;
+    (j.areas||[]).forEach(area=>{
+      (area.observations||[]).forEach(obs=>{
+        if (obs.is_repeated) repeatedCount++; else newCount++;
+        const rc = obs.root_cause || "Not stated";
+        rootCauseMap[rc] = (rootCauseMap[rc]||0) + 1;
+      });
+    });
+
+    units.push({ unitName:r.unit_name, fy:r.fy, rating:j.report_metadata?.overall_rating||"",
+      critical:c,high:h,medium:m,low:l, total:c+h+m+l, repeatedCount, newCount });
+
+    if(!repeatedByUnit[r.unit_name]) repeatedByUnit[r.unit_name]=[];
+    repeatedByUnit[r.unit_name].push({ fy:r.fy, repeated:repeatedCount, new:newCount, total:repeatedCount+newCount });
+
+    (j.audit_summary?.area_wise_summary||[]).forEach(row=>{
+      if(!areaMap[row.area]) areaMap[row.area]={area:row.area,critical:0,high:0,medium:0,low:0,total:0,units:new Set()};
+      const a=areaMap[row.area];
+      a.critical+=row.critical||0; a.high+=row.high||0; a.medium+=row.medium||0; a.low+=row.low||0; a.total+=row.total||0;
+      a.units.add(r.unit_name);
+    });
+
+    (j.limitations||[]).forEach(lim=>{
+      if(!lim.area || !(lim.items||[]).length) return;
+      if(!limitationsMap[lim.area]) limitationsMap[lim.area]={area:lim.area, units:new Set(), itemsByUnit:{}};
+      limitationsMap[lim.area].units.add(r.unit_name);
+      limitationsMap[lim.area].itemsByUnit[r.unit_name] = lim.items;
+    });
+  });
+
+  const areaRollup = Object.values(areaMap).map(a=>({...a,unitCount:a.units.size})).sort((a,b)=>b.total-a.total);
+  const limitationsRollup = Object.values(limitationsMap).map(l=>({...l,unitCount:l.units.size})).sort((a,b)=>b.unitCount-a.unitCount);
+  Object.values(repeatedByUnit).forEach(arr=>arr.sort((a,b)=>String(a.fy).localeCompare(String(b.fy))));
+  const repeatedTotals = units.reduce((acc,u)=>({repeated:acc.repeated+u.repeatedCount, new:acc.new+u.newCount}),{repeated:0,new:0});
+  const rootCauseRollup = Object.entries(rootCauseMap).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value);
+
+  return {
+    totals:{...totals,total:totals.critical+totals.high+totals.medium+totals.low},
+    units:units.sort((a,b)=>b.total-a.total),
+    areaRollup, limitationsRollup, repeatedByUnit, repeatedTotals, rootCauseRollup,
+  };
+}
+
+// ── Consolidated (company-wide) view — automatically built from Live reports ─
+function ConsolidatedView({ clientName, reports, onSelectUnit }) {
+  const [openArea,setOpenArea]=useState(null);
+  const [openLim,setOpenLim]=useState(null);
+  if(!reports.length) return null;
+  const { totals, units, areaRollup, limitationsRollup, repeatedByUnit, repeatedTotals, rootCauseRollup } = buildConsolidated(reports);
+  const findReport = unitName => reports.find(r=>r.unit_name===unitName);
+  return (
+    <div style={{ marginBottom:28 }}>
+      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"24px", marginBottom:18 }}>
+        <h2 style={{ fontSize:20, fontWeight:900, color:P.slate, marginBottom:4 }}>Company Overview</h2>
+        <div style={{ fontSize:13, color:P.muted }}>Consolidated across {units.length} unit{units.length>1?"s":""}</div>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:12, marginBottom:18 }}>
+        {[["Total Observations",totals.total,P.slate],["Critical",totals.critical,RISK.Critical],["High",totals.high,RISK.High],
+          ["Medium",totals.medium,RISK.Medium],["Low",totals.low,RISK.Low]].map(([l,v,c])=>(
+          <div key={l} style={{ background:P.white, borderRadius:12, border:`1px solid ${P.border}`, padding:"18px" }}>
+            <div style={{ fontSize:11, fontWeight:700, color:P.muted, letterSpacing:.5, marginBottom:6 }}>{l.toUpperCase()}</div>
+            <div style={{ fontSize:28, fontWeight:900, color:c }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:18 }}>
+        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px" }}>
+          <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:2 }}>Observations by Risk Level</div>
+          <div style={{ fontSize:12, color:P.muted, marginBottom:8 }}>Across all units</div>
+          <RiskDonut risk={totals}/>
+        </div>
+        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px" }}>
+          <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:2 }}>Observations by Root Cause</div>
+          <div style={{ fontSize:12, color:P.muted, marginBottom:8 }}>Across all units</div>
+          <RootCauseDonut rootCauseRollup={rootCauseRollup}/>
+        </div>
+      </div>
+      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px", marginBottom:18 }}>
+        <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:14 }}>Unit-wise Comparison</div>
+        <UnitBarChart units={units}/>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13, marginTop:16 }}>
+          <thead><tr style={{ background:"#F8FAFC" }}>
+            {["Unit","FY","Rating","Critical","High","Medium","Low","Total"].map(h=>(
+              <th key={h} style={{ padding:"9px 12px", textAlign:h==="Unit"||h==="FY"||h==="Rating"?"left":"center", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {units.map((u,i)=>(
+              <tr key={i} onClick={()=>onSelectUnit&&onSelectUnit(findReport(u.unitName))}
+                style={{ borderBottom:`1px solid ${P.border}`, background:i%2===0?P.white:"#FAFAFA", cursor:onSelectUnit?"pointer":"default" }}>
+                <td style={{ padding:"10px 12px", fontWeight:700, color:P.slate }}>{u.unitName}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{u.fy}</td>
+                <td style={{ padding:"10px 12px", color:P.mid }}>{u.rating||"—"}</td>
+                {[u.critical,u.high,u.medium,u.low].map((v,vi)=>(
+                  <td key={vi} style={{ padding:"10px 12px", textAlign:"center", fontWeight:700, color:[RISK.Critical,RISK.High,RISK.Medium,RISK.Low][vi] }}>{v||"—"}</td>
+                ))}
+                <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:800, color:P.slate }}>{u.total}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px" }}>
+        <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:6 }}>Common Observation Areas</div>
+        <div style={{ fontSize:12, color:P.muted, marginBottom:16 }}>Areas rolled up across all units — click to see which units are affected.</div>
+        {areaRollup.map(row=>{
+          const isOpen=openArea===row.area;
+          return (
+            <div key={row.area} style={{ marginBottom:8, border:`1px solid ${isOpen?P.blueBd:P.border}`, borderRadius:10, overflow:"hidden" }}>
+              <div onClick={()=>setOpenArea(isOpen?null:row.area)}
+                style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", cursor:"pointer", background:isOpen?P.blueLt:P.white }}>
+                <span style={{ fontSize:12, color:P.muted, transform:isOpen?"rotate(90deg)":"none" }}>▶</span>
+                <div style={{ flex:1, fontWeight:700, color:P.slate, fontSize:14 }}>{row.area}</div>
+                <span style={{ fontSize:11, color:P.muted }}>{row.unitCount} unit{row.unitCount>1?"s":""} affected</span>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {[["C",row.critical,RISK.Critical],["H",row.high,RISK.High],["M",row.medium,RISK.Medium],["L",row.low,RISK.Low]]
+                    .map(([k,v,c])=>v>0?<span key={k} style={{ background:c, color:"#fff", borderRadius:5, padding:"2px 8px", fontSize:11, fontWeight:800 }}>{k} {v}</span>:null)}
+                </div>
+                <div style={{ fontSize:13, fontWeight:800, color:P.slate, minWidth:28, textAlign:"right" }}>{row.total}</div>
+              </div>
+              {isOpen&&(
+                <div style={{ borderTop:`1px solid ${P.border}`, background:"#FBFCFE", padding:"12px 16px 12px 42px", fontSize:12, color:P.mid }}>
+                  Affected units: {[...row.units].join(", ")}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Repeated Observations — unit-wise, with FY-over-FY comparison */}
+      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px", marginTop:18 }}>
+        <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:6 }}>Repeated Observations</div>
+        <div style={{ fontSize:12, color:P.muted, marginBottom:16 }}>Observations carried over from a prior audit, by unit. Where a unit has more than one report, the change from its last audit is shown.</div>
+        <div style={{ display:"flex", gap:12, marginBottom:16, flexWrap:"wrap" }}>
+          {[["Repeated",repeatedTotals.repeated,P.amber],["New",repeatedTotals.new,P.blue]].map(([l,v,c])=>(
+            <div key={l} style={{ flex:1, minWidth:120, background:c+"12", borderRadius:10, padding:"14px 16px" }}>
+              <div style={{ fontSize:11, fontWeight:700, color:c, letterSpacing:.5 }}>{l.toUpperCase()}</div>
+              <div style={{ fontSize:24, fontWeight:900, color:c, marginTop:4 }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+          <thead><tr style={{ background:"#F8FAFC" }}>
+            {["Unit","FY","Repeated","New","Total","Repeat Rate","vs Last Audit"].map(h=>(
+              <th key={h} style={{ padding:"9px 12px", textAlign:(h==="Unit"||h==="FY")?"left":"center", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {Object.entries(repeatedByUnit).flatMap(([unitName,rows])=>rows.map((row,i)=>{
+              const rate = row.total ? Math.round(row.repeated/row.total*100) : 0;
+              const prev = i>0 ? rows[i-1] : null;
+              const trend = prev ? (row.repeated>prev.repeated?"up":row.repeated<prev.repeated?"down":"flat") : null;
+              return (
+                <tr key={unitName+row.fy} style={{ borderBottom:`1px solid ${P.border}` }}>
+                  <td style={{ padding:"10px 12px", fontWeight:700, color:P.slate }}>{i===0?unitName:""}</td>
+                  <td style={{ padding:"10px 12px", color:P.mid }}>{row.fy}</td>
+                  <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:700, color:P.amber }}>{row.repeated}</td>
+                  <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:700, color:P.blue }}>{row.new}</td>
+                  <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:800, color:P.slate }}>{row.total}</td>
+                  <td style={{ padding:"10px 12px", textAlign:"center", color:P.mid }}>{rate}%</td>
+                  <td style={{ padding:"10px 12px", textAlign:"center" }}>
+                    {trend==="up"&&<span style={{ color:P.red, fontWeight:800, fontSize:12 }}>▲ Worse</span>}
+                    {trend==="down"&&<span style={{ color:P.green, fontWeight:800, fontSize:12 }}>▼ Better</span>}
+                    {trend==="flat"&&<span style={{ color:P.muted, fontSize:12 }}>— Same</span>}
+                    {!prev&&<span style={{ color:P.muted, fontSize:11 }}>first report</span>}
+                  </td>
+                </tr>
+              );
+            }))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Scope Limitations — unit-wise & consolidated */}
+      {limitationsRollup.length>0 && (
+        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px", marginTop:18 }}>
+          <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:6 }}>Scope Limitations</div>
+          <div style={{ fontSize:12, color:P.muted, marginBottom:16 }}>Data not made available during the audit, rolled up by area — click to see which units and what was missing.</div>
+          {limitationsRollup.map(row=>{
+            const isOpen=openLim===row.area;
+            return (
+              <div key={row.area} style={{ marginBottom:8, border:`1px solid ${isOpen?P.blueBd:P.border}`, borderRadius:10, overflow:"hidden" }}>
+                <div onClick={()=>setOpenLim(isOpen?null:row.area)}
+                  style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", cursor:"pointer", background:isOpen?P.blueLt:P.white }}>
+                  <span style={{ fontSize:12, color:P.muted, transform:isOpen?"rotate(90deg)":"none" }}>▶</span>
+                  <div style={{ flex:1, fontWeight:700, color:P.slate, fontSize:14 }}>{row.area}</div>
+                  <span style={{ fontSize:11, color:P.muted }}>{row.unitCount} unit{row.unitCount>1?"s":""} affected</span>
+                </div>
+                {isOpen&&(
+                  <div style={{ borderTop:`1px solid ${P.border}`, background:"#FBFCFE", padding:"12px 16px" }}>
+                    {Object.entries(row.itemsByUnit).map(([unitName,items])=>(
+                      <div key={unitName} style={{ marginBottom:10 }}>
+                        <div style={{ fontSize:12, fontWeight:700, color:P.slate, marginBottom:4 }}>{unitName}</div>
+                        <div style={{ fontSize:12, color:P.mid, paddingLeft:12 }}>
+                          {items.map((it,ii)=>(<div key={ii}>• {it}</div>))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function readableError(err){
+  const raw=(err&&(err.message||err.error_description))||""; const st=err&&err.status;
+  if(st===429||/rate limit|too many/i.test(raw)) return "Too many attempts. Please wait a minute and try again.";
+  if(st===500||/unexpected_failure/i.test(raw)) return "Email could not be sent. Please contact NCLS & Associates.";
+  if(/expired|invalid/i.test(raw)) return "That code is invalid or expired. Request a new one.";
+  return raw||"Something went wrong. Please try again.";
+}
+
+const Btn=({children,onClick,color="blue",size="md",outline,full,disabled})=>{
+  const C={blue:{bg:P.blue,t:"#fff",b:P.blue},gray:{bg:"#F1F5F9",t:P.mid,b:P.border},red:{bg:P.red,t:"#fff",b:P.red}};
+  const c=C[color]||C.blue; const pad=size==="sm"?"5px 12px":size==="lg"?"12px 24px":"8px 18px";
+  return <button onClick={onClick} disabled={disabled} style={{background:outline?"transparent":(disabled?"#E2E8F0":c.bg),
+    color:outline?c.bg:(disabled?P.muted:c.t),border:`1.5px solid ${disabled?P.border:c.b}`,borderRadius:8,padding:pad,
+    fontWeight:700,fontSize:size==="sm"?12:13,cursor:disabled?"not-allowed":"pointer",width:full?"100%":"auto"}}>{children}</button>;
+};
+
+// ── LOGIN ─────────────────────────────────────────────────────────────────
+function LoginScreen(){
+  const [email,setEmail]=useState(""); const [code,setCode]=useState("");
+  const [step,setStep]=useState("email"); const [busy,setBusy]=useState(false); const [error,setError]=useState("");
+  const send=async()=>{ setError(""); const em=email.trim().toLowerCase();
+    if(!em.includes("@")){setError("Please enter a valid email address.");return;}
+    setBusy(true);
+    const {error:err}=await sb.auth.signInWithOtp({email:em,options:{shouldCreateUser:true}});
+    setBusy(false); if(err){setError(readableError(err));return;} setStep("code"); };
+  const verify=async()=>{ setError("");
+    if(code.trim().length<6){setError("Please enter the code from your email.");return;}
+    setBusy(true);
+    const {error:err}=await sb.auth.verifyOtp({email:email.trim().toLowerCase(),token:code.trim(),type:"email"});
+    setBusy(false); if(err){setError(readableError(err));} };
+  return (
+    <div style={{minHeight:"100vh",background:P.ink,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{width:"100%",maxWidth:420}}>
+        <div style={{textAlign:"center",marginBottom:36}}>
+          <div style={{display:"inline-flex",alignItems:"center",gap:10,marginBottom:16}}>
+            <div style={{width:40,height:40,background:P.blue,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,fontWeight:900,color:"#fff"}}>N</div>
+            <div style={{textAlign:"left"}}>
+              <div style={{fontWeight:800,color:"#F8FAFC",fontSize:16}}>NCLS & Associates</div>
+              <div style={{fontSize:11,color:P.muted}}>Chartered Accountants</div></div>
+          </div>
+          <div style={{fontSize:22,fontWeight:800,color:"#F8FAFC",marginBottom:6}}>Audit Dashboard</div>
+          <div style={{fontSize:13,color:P.muted}}>Sign in with your registered email address</div>
+        </div>
+        <div style={{background:"#1C2333",borderRadius:16,padding:"32px 28px",border:"1px solid #2D3748"}}>
+          {step==="email"?(<>
+            <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>EMAIL ADDRESS</label>
+            <input value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder="you@company.com" autoFocus
+              style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:14,outline:"none",marginBottom:8}}/>
+            {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
+            <button onClick={send} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginTop:6,cursor:"pointer"}}>
+              {busy?"Sending code...":"Send One-Time Code →"}</button>
+          </>):(<>
+            <div style={{fontSize:13,color:P.muted,marginBottom:18}}>Code sent to <strong style={{color:"#93C5FD"}}>{email}</strong>. Check your inbox and spam folder.</div>
+            <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>SIGN-IN CODE</label>
+            <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,8))} onKeyDown={e=>e.key==="Enter"&&verify()}
+              placeholder="Enter code" autoFocus maxLength={8}
+              style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:22,fontWeight:800,letterSpacing:6,textAlign:"center",outline:"none",marginBottom:8}}/>
+            {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
+            <button onClick={verify} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginBottom:12,cursor:"pointer"}}>
+              {busy?"Verifying...":"Verify & Sign In →"}</button>
+            <div style={{textAlign:"center",fontSize:12}}>
+              <span onClick={()=>{setStep("email");setCode("");setError("");}} style={{color:"#93C5FD",cursor:"pointer"}}>← Change email / resend</span></div>
+          </>)}
+        </div>
+        <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"#374151"}}>
+          Access is limited to email addresses registered by NCLS & Associates.</div>
+      </div>
+    </div>
+  );
+}
+
+// ── REPORT DETAIL ─────────────────────────────────────────────────────────
+function ReportView({ report, onBack, showToast }) {
+  const [openArea,setOpenArea]=useState(null);
+  const [openObs,setOpenObs]=useState(null);
+  const j=report.report_json;
+  if(!j||!j.audit_summary) return (
+    <div style={{maxWidth:1200,margin:"0 auto",padding:"28px"}}>
+      <span onClick={onBack} style={{fontSize:13,color:P.blue,cursor:"pointer",fontWeight:600}}>← Back to all reports</span>
+      <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"40px",textAlign:"center",marginTop:18,color:P.muted}}>
+        This report has no structured data attached.</div>
+    </div>
+  );
+  const risk=j.audit_summary.observation_count_by_risk||{};
+  const total=(risk.critical||0)+(risk.high||0)+(risk.medium||0)+(risk.low||0);
+  const meta=j.report_metadata||{};
+  const repeatedCount=(j.areas||[]).reduce((n,a)=>n+(a.observations||[]).filter(o=>o.is_repeated).length,0);
+  const rootCauseMap={};
+  (j.areas||[]).forEach(a=>(a.observations||[]).forEach(o=>{ const rc=o.root_cause||"Not stated"; rootCauseMap[rc]=(rootCauseMap[rc]||0)+1; }));
+  const rootCauseRollup=Object.entries(rootCauseMap).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value);
+
+  const download=async(path)=>{
+    if(!path) return;
+    try{
+      const {data,error}=await sb.storage.from("reports").createSignedUrl(path,120);
+      if(error) throw new Error(error.message);
+      window.open(data.signedUrl,"_blank");
+    }catch(e){ showToast("Could not open file: "+e.message,"error"); }
+  };
+
+  return (
+    <div style={{maxWidth:1200,margin:"0 auto",padding:"28px"}}>
+      <div style={{marginBottom:18}}>
+        <span onClick={onBack} style={{fontSize:13,color:P.blue,cursor:"pointer",fontWeight:600}}>← Back to all reports</span>
+      </div>
+      <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"24px",marginBottom:18}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:14}}>
+          <div>
+            <h1 style={{fontSize:22,fontWeight:900,color:P.slate,marginBottom:4}}>{report.client_name}</h1>
+            <div style={{fontSize:14,color:P.mid}}>{report.unit_name} · FY {report.fy}</div>
+            {report.period&&<div style={{fontSize:12,color:P.muted,marginTop:6}}>Period: {report.period}</div>}
+            {report.udin&&<div style={{fontSize:12,color:P.muted}}>UDIN: {report.udin}</div>}
+            {meta.auditors&&<div style={{fontSize:12,color:P.muted}}>Auditors: {Array.isArray(meta.auditors)?meta.auditors.join(", "):meta.auditors}</div>}
+          </div>
+          <div style={{textAlign:"right"}}>
+            {meta.overall_rating&&<>
+              <div style={{fontSize:11,fontWeight:700,color:P.muted,marginBottom:4}}>OVERALL RATING</div>
+              <div style={{background:P.greenLt,color:P.green,border:`1px solid ${P.greenBd}`,borderRadius:8,padding:"8px 16px",fontSize:15,fontWeight:800}}>{meta.overall_rating}</div>
+            </>}
+            <div style={{marginTop:10,display:"flex",gap:6,justifyContent:"flex-end",flexWrap:"wrap"}}>
+              {report.report_file&&<Btn size="sm" color="gray" onClick={()=>download(report.report_file)}>⬇ Download Report</Btn>}
+              {report.annexure_file&&<Btn size="sm" color="gray" onClick={()=>download(report.annexure_file)}>⬇ Annexure</Btn>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:18}}>
+        {[["Total Observations",total,P.slate],["Repeated",repeatedCount,P.amber],["Critical",risk.critical||0,RISK.Critical],["High",risk.high||0,RISK.High],
+          ["Medium",risk.medium||0,RISK.Medium],["Low",risk.low||0,RISK.Low]].map(([l,v,c])=>(
+          <div key={l} style={{background:P.white,borderRadius:12,border:`1px solid ${P.border}`,padding:"18px"}}>
+            <div style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:6}}>{l.toUpperCase()}</div>
+            <div style={{fontSize:28,fontWeight:900,color:c}}>{v}</div></div>))}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:18}}>
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
+          <div style={{fontSize:15,fontWeight:800,color:P.slate,marginBottom:8}}>Observations by Risk Level</div>
+          <RiskDonut risk={risk}/>
+        </div>
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
+          <div style={{fontSize:15,fontWeight:800,color:P.slate,marginBottom:8}}>Observations by Root Cause</div>
+          <RootCauseDonut rootCauseRollup={rootCauseRollup}/>
+        </div>
+      </div>
+
+      <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px",marginBottom:18}}>
+        <div style={{fontSize:15,fontWeight:800,color:P.slate,marginBottom:6}}>Area-wise Observations</div>
+        <div style={{fontSize:12,color:P.muted,marginBottom:16}}>Click an area to see its observations, then click an observation for full detail.</div>
+        {(j.audit_summary.area_wise_summary||[]).map(row=>{
+          const isOpen=openArea===row.area;
+          const area=(j.areas||[]).find(a=>a.area_name===row.area);
+          return (
+            <div key={row.area} style={{marginBottom:8,border:`1px solid ${isOpen?P.blueBd:P.border}`,borderRadius:10,overflow:"hidden"}}>
+              <div onClick={()=>{setOpenArea(isOpen?null:row.area);setOpenObs(null);}}
+                style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",cursor:"pointer",background:isOpen?P.blueLt:P.white}}>
+                <span style={{fontSize:12,color:P.muted,transform:isOpen?"rotate(90deg)":"none"}}>▶</span>
+                <div style={{flex:1,fontWeight:700,color:P.slate,fontSize:14}}>{row.area}</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {[["C",row.critical,RISK.Critical],["H",row.high,RISK.High],["M",row.medium,RISK.Medium],["L",row.low,RISK.Low]]
+                    .map(([k,v,c])=>v>0?<span key={k} style={{background:c,color:"#fff",borderRadius:5,padding:"2px 8px",fontSize:11,fontWeight:800}}>{k} {v}</span>:null)}
+                </div>
+                <div style={{fontSize:13,fontWeight:800,color:P.slate,minWidth:28,textAlign:"right"}}>{row.total}</div>
+              </div>
+              {isOpen&&area&&(
+                <div style={{borderTop:`1px solid ${P.border}`,background:"#FBFCFE"}}>
+                  {(area.observations||[]).map((obs,oi)=>(
+                    <div key={oi}>
+                      <div onClick={()=>setOpenObs(openObs===`${row.area}-${oi}`?null:`${row.area}-${oi}`)}
+                        style={{display:"flex",alignItems:"center",gap:10,padding:"11px 16px 11px 42px",cursor:"pointer",
+                          borderBottom:`1px solid ${P.border}`,background:openObs===`${row.area}-${oi}`?P.white:"transparent"}}>
+                        <span style={{width:8,height:8,borderRadius:"50%",background:RISK[obs.risk_level]||P.muted,flexShrink:0}}/>
+                        <div style={{flex:1,fontSize:13,color:P.slate,fontWeight:600}}>{obs.title}</div>
+                        {obs.is_repeated&&<span style={{background:P.amberLt,color:P.amber,border:`1px solid ${P.amberBd}`,borderRadius:5,padding:"2px 8px",fontSize:10,fontWeight:800}}>REPEATED</span>}
+                        <span style={{background:(RISK[obs.risk_level]||P.muted)+"18",color:RISK[obs.risk_level]||P.muted,
+                          borderRadius:5,padding:"2px 9px",fontSize:11,fontWeight:700}}>{obs.risk_level}</span>
+                      </div>
+                      {openObs===`${row.area}-${oi}`&&(
+                        <div style={{padding:"16px 20px 20px 42px",background:P.white,borderBottom:`1px solid ${P.border}`}}>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+                            <div><div style={{fontSize:10,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:3}}>RESPONSIBLE</div>
+                              <div style={{fontSize:13,color:P.slate,fontWeight:600}}>{obs.responsible||"—"}</div></div>
+                            <div><div style={{fontSize:10,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:3}}>TARGET DATE</div>
+                              <div style={{fontSize:13,color:P.slate,fontWeight:600}}>{obs.target_date||"—"}</div></div>
+                          </div>
+                          {obs.is_repeated&&<div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:12,color:P.amber}}>
+                            <strong>Repeated from a prior audit</strong>{obs.pending_since_days?` — pending ${obs.pending_since_days} days`:""}</div>}
+                          {obs.observation&&<div style={{marginBottom:14}}>
+                            <div style={{fontSize:10,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:4}}>OBSERVATION</div>
+                            <div style={{fontSize:13,color:P.mid,lineHeight:1.6}}>{obs.observation}</div></div>}
+                          {obs.action_plan&&<div style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:8,padding:"12px 14px"}}>
+                            <div style={{fontSize:10,fontWeight:700,color:P.green,letterSpacing:.5,marginBottom:4}}>MANAGEMENT ACTION PLAN</div>
+                            <div style={{fontSize:13,color:"#166534",lineHeight:1.6}}>{obs.action_plan}</div></div>}
+                        </div>)}
+                    </div>))}
+                </div>)}
+            </div>);
+        })}
+      </div>
+
+      {(j.limitations||[]).length>0 && (
+        <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px",marginTop:18}}>
+          <div style={{fontSize:15,fontWeight:800,color:P.slate,marginBottom:6}}>Scope Limitations</div>
+          <div style={{fontSize:12,color:P.muted,marginBottom:16}}>Data not made available to the auditors during this engagement.</div>
+          {j.limitations.map((lim,li)=>(
+            <div key={li} style={{marginBottom:12,paddingBottom:12,borderBottom:li<j.limitations.length-1?`1px solid ${P.border}`:"none"}}>
+              <div style={{fontSize:13,fontWeight:700,color:P.slate,marginBottom:6}}>{lim.area}</div>
+              <div style={{fontSize:12,color:P.mid,paddingLeft:12}}>
+                {(lim.items||[]).map((it,ii)=>(<div key={ii} style={{marginBottom:2}}>• {it}</div>))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── APP ───────────────────────────────────────────────────────────────────
+function App(){
+  const [authState,setAuthState]=useState("loading");
+  const [viewer,setViewer]=useState(null);
+  const [reports,setReports]=useState([]);
+  const [openId,setOpenId]=useState(null);
+  const [toast,setToast]=useState(null);
+  const showToast=(msg,type="success")=>setToast({msg,type});
+
+  const load=async(email)=>{
+    const {data:acc}=await sb.from("client_access").select("*").eq("status","Active");
+    const mine=(acc||[]).filter(a=>a.email?.toLowerCase()===email);
+    // reports RLS already limits rows to what this viewer may see
+    const {data:reps}=await sb.from("reports").select("*").eq("status","Live").order("id",{ascending:false});
+    if(!mine.length && !(reps||[]).length){ setAuthState("denied"); return; }
+    const clientName = mine[0]?.client_name || (reps||[])[0]?.client_name || "";
+    setViewer({ email, name:mine[0]?.name||email, designation:mine[0]?.designation||"",
+      clientName, levels:mine.map(m=>m.access_level) });
+    setReports(reps||[]);
+    setAuthState("ready");
+  };
+
+  useEffect(()=>{
+    sb.auth.getSession().then(({data})=>{
+      if(data.session) load(data.session.user.email.toLowerCase()); else setAuthState("login");
+    });
+    const {data:sub}=sb.auth.onAuthStateChange((_e,sess)=>{
+      if(sess) load(sess.user.email.toLowerCase()); else { setViewer(null); setAuthState("login"); }
+    });
+    return ()=>sub.subscription.unsubscribe();
+  },[]);
+
+  const signOut=async()=>{ await sb.auth.signOut(); };
+
+  if(authState==="loading") return <div style={{minHeight:"100vh",background:P.ink,display:"flex",alignItems:"center",justifyContent:"center",color:"#9CA3AF",fontSize:14}}>Loading...</div>;
+  if(authState==="login") return <LoginScreen/>;
+  if(authState==="denied") return (
+    <div style={{minHeight:"100vh",background:P.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:14,padding:"32px",maxWidth:480,textAlign:"center"}}>
+        <div style={{fontSize:32,marginBottom:12}}>🔒</div>
+        <div style={{fontSize:17,fontWeight:800,color:P.red,marginBottom:8}}>No Dashboard Access</div>
+        <div style={{fontSize:13,color:"#991B1B",marginBottom:20}}>
+          Your email is verified, but no reports have been shared with this address. Please contact NCLS & Associates.</div>
+        <Btn color="red" outline onClick={signOut}>Sign out</Btn>
+      </div>
+    </div>
+  );
+
+  const open=openId?reports.find(r=>r.id===openId):null;
+
+  return (
+    <div style={{minHeight:"100vh",background:P.bg}}>
+      <div style={{background:P.ink,padding:"0 28px",position:"sticky",top:0,zIndex:50}}>
+        <div style={{maxWidth:1200,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between",height:54,flexWrap:"wrap",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:30,height:30,background:P.blue,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:900,color:"#fff"}}>N</div>
+            <span style={{fontWeight:800,color:"#F8FAFC",fontSize:14}}>NCLS & Associates</span>
+            <span style={{color:"#374151"}}>·</span>
+            <span style={{fontSize:13,color:"#9CA3AF"}}>Audit Dashboard</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <span style={{fontSize:12,color:"#6B7280"}}>{viewer.name}{viewer.designation?` · ${viewer.designation}`:""}</span>
+            <button onClick={signOut} style={{background:"#1C2333",color:"#9CA3AF",border:"1px solid #2D3748",borderRadius:7,padding:"5px 12px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Sign out</button>
+          </div>
+        </div>
+      </div>
+
+      {open ? <ReportView report={open} onBack={()=>setOpenId(null)} showToast={showToast}/> : (
+        <div style={{maxWidth:1200,margin:"0 auto",padding:"28px"}}>
+          <div style={{marginBottom:22}}>
+            <h1 style={{fontSize:22,fontWeight:900,color:P.slate,marginBottom:4}}>{viewer.clientName}</h1>
+            <p style={{fontSize:13,color:P.muted}}>
+              Signed in as <strong>{viewer.name}</strong>{viewer.designation?`, ${viewer.designation}`:""} · {viewer.email}
+            </p>
+          </div>
+          {reports.length===0?(
+            <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"48px 24px",textAlign:"center"}}>
+              <div style={{fontSize:32,marginBottom:12}}>📭</div>
+              <div style={{fontSize:16,fontWeight:800,color:P.slate,marginBottom:6}}>No published reports yet</div>
+              <div style={{fontSize:13,color:P.muted}}>Reports appear here once they are published by NCLS & Associates.</div>
+            </div>
+          ):(<>
+          {new Set(reports.map(r=>r.unit_name)).size>1 && (
+            <ConsolidatedView clientName={viewer.clientName} reports={reports} onSelectUnit={r=>setOpenId(r.id)}/>
+          )}
+          {new Set(reports.map(r=>r.unit_name)).size>1 && (
+            <div style={{fontSize:15,fontWeight:800,color:P.slate,marginBottom:14}}>Individual Unit Reports</div>
+          )}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:16}}>
+              {reports.map(r=>{
+                const risk=r.report_json?.audit_summary?.observation_count_by_risk||{};
+                const total=(risk.critical||0)+(risk.high||0)+(risk.medium||0)+(risk.low||0);
+                return (
+                  <div key={r.id} onClick={()=>setOpenId(r.id)}
+                    style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"20px",cursor:"pointer"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,gap:8}}>
+                      <div><div style={{fontSize:16,fontWeight:800,color:P.slate}}>{r.unit_name}</div>
+                        <div style={{fontSize:12,color:P.muted,marginTop:2}}>FY {r.fy}</div></div>
+                      <span style={{background:P.greenLt,color:P.green,border:`1px solid ${P.greenBd}`,borderRadius:5,padding:"2px 9px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>Published</span>
+                    </div>
+                    <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+                      {[["Critical",risk.critical||0,RISK.Critical],["High",risk.high||0,RISK.High],
+                        ["Medium",risk.medium||0,RISK.Medium],["Low",risk.low||0,RISK.Low]].map(([l,v,c])=>(
+                        <div key={l} style={{flex:1,minWidth:58,background:c+"12",borderRadius:8,padding:"8px 6px",textAlign:"center"}}>
+                          <div style={{fontSize:18,fontWeight:900,color:c}}>{v}</div>
+                          <div style={{fontSize:9,fontWeight:700,color:c}}>{l.toUpperCase()}</div></div>))}
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:12,borderTop:`1px solid ${P.border}`}}>
+                      <span style={{fontSize:12,color:P.muted}}>{total} observations</span>
+                      <span style={{fontSize:12,color:P.blue,fontWeight:700}}>View →</span></div>
+                  </div>);})}
+            </div>
+          </>)}
+        </div>)}
+
+      {toast&&<div style={{position:"fixed",bottom:24,right:24,zIndex:100,background:toast.type==="error"?P.redLt:P.greenLt,
+        color:toast.type==="error"?P.red:P.green,border:`1px solid ${toast.type==="error"?P.redBd:P.greenBd}`,
+        borderRadius:10,padding:"12px 18px",fontSize:13,fontWeight:600,maxWidth:360}}>{toast.msg}</div>}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+<script>
+  window.addEventListener('error',function(e){
+    const r=document.getElementById('root');
+    if(r&&!r.hasChildNodes()) {
+      const detail = (e.message && e.message !== 'Script error.')
+        ? e.message
+        : (e.message||'Unknown error') + (e.filename ? ' (' + e.filename.split('/').pop() + (e.lineno?':'+e.lineno:'') + ')' : '');
+      r.innerHTML='<div style="padding:40px;font-family:sans-serif;color:#DC2626;background:#FEF2F2;border-radius:12px;margin:40px auto;max-width:500px;border:1px solid #FECACA"><h2>Dashboard failed to load</h2><p>'+detail+'</p></div>';
+    }
+  });
+
+  function loadScript(src) {
+    return fetch(src).then(function(res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status + ' loading ' + src);
+      return res.text();
+    }).then(function(code) {
+      const s = document.createElement('script');
+      s.textContent = code;
+      document.head.appendChild(s);
+    });
+  }
+
+  function loadRecharts() {
+    return loadScript('https://unpkg.com/recharts@2.12.7/umd/Recharts.js')
+      .catch(function(err1){
+        return loadScript('https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js')
+          .catch(function(err2){ throw new Error(err1.message + ' / ' + err2.message); });
+      });
+  }
+
+  loadRecharts().then(function() {
+    try {
+      const src=document.getElementById('app-source').textContent;
+      const out=Babel.transform(src,{presets:[['react',{runtime:'classic'}]]}).code;
+      const s=document.createElement('script'); s.textContent=out; document.body.appendChild(s);
+    } catch (renderErr) {
+      const r=document.getElementById('root');
+      r.innerHTML='<div style="padding:40px;font-family:sans-serif;color:#DC2626;background:#FEF2F2;border-radius:12px;margin:40px auto;max-width:500px;border:1px solid #FECACA"><h2>Dashboard failed to load</h2><p>'+(renderErr.message||'Unknown error while starting the app')+'</p></div>';
+    }
+  }).catch(function(err) {
+    const r=document.getElementById('root');
+    r.innerHTML='<div style="padding:40px;font-family:sans-serif;color:#DC2626;background:#FEF2F2;border-radius:12px;margin:40px auto;max-width:500px;border:1px solid #FECACA"><h2>Dashboard failed to load</h2><p>The charting library could not be downloaded: '+(err.message||'unknown error')+'</p><p style="font-size:13px;color:#7F1D1D">This usually means something on this network or device is blocking downloads from unpkg.com and cdn.jsdelivr.net — try a different network, or check with your IT/network admin about allowing those two sites.</p></div>';
+  });
+</script>
+</body>
+</html>
