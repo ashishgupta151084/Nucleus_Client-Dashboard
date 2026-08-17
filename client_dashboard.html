@@ -28,7 +28,7 @@ const sb = supabase.createClient(SB_URL, SB_KEY);
 const P={ink:"#0D1117",slate:"#1E293B",mid:"#475569",muted:"#94A3B8",border:"#E2E8F0",bg:"#F1F5F9",white:"#FFFFFF",
   blue:"#1D4ED8",blueLt:"#EFF6FF",blueBd:"#BFDBFE",green:"#16A34A",greenLt:"#F0FDF4",greenBd:"#BBF7D0",
   red:"#DC2626",redLt:"#FEF2F2",redBd:"#FECACA",amber:"#D97706",amberLt:"#FFFBEB",amberBd:"#FDE68A"};
-const RISK={Critical:"#DC2626",High:"#EA580C",Medium:"#D97706",Low:"#16A34A"};
+const RISK={Critical:"#DC2626",High:"#1E3A8A",Medium:"#93C5FD",Low:"#16A34A"};
 const RISK_ORDER = ["Critical","High","Medium","Low"];
 const ROOT_CAUSE_COLORS = [P.blue, P.purple, P.amber, "#0D9488", P.red, P.muted];
 
@@ -84,302 +84,790 @@ function UnitBarChart({ units, size=280 }) {
 }
 
 // ── Build a consolidated (company-level) summary from a set of reports ────
-function buildConsolidated(reports) {
+function buildConsolidated(reports, commonRows) {
   const totals = { critical:0, high:0, medium:0, low:0 };
   const units = [];
   const areaMap = {};
   const limitationsMap = {};
   const repeatedByUnit = {};
   const rootCauseMap = {};
+  const allObs = [];            // every observation, flattened — powers drill-down
+  const priorObs = [];          // prior-year open items from the report's own section
+  const mismatches = [];        // where the exec summary disagrees with the counted observations
+  const finImpactMap = {};      // category -> { total, byUnit }
+  const priorOpenByArea = {};   // area -> unit -> count (from is_repeated + pending days)
+  const repeatedObsByArea = {};
 
   reports.forEach(r => {
     const j = r.report_json || {};
-    const risk = j.audit_summary?.observation_count_by_risk || {};
-    const c=risk.critical||0, h=risk.high||0, m=risk.medium||0, l=risk.low||0;
+    const unit = r.unit_name;
+    // Counts are derived by COUNTING the actual observations, never taken from
+    // the executive-summary block. The summary is used only to flag mismatches.
+    const claimed = j.audit_summary?.observation_count_by_risk || {};
+    const tally = { critical:0, high:0, medium:0, low:0 };
+    (j.areas||[]).forEach(a=>(a.observations||[]).forEach(o=>{
+      const k = String(o.risk_level||"").toLowerCase();
+      if (tally[k] !== undefined) tally[k]++;
+    }));
+    const c=tally.critical, h=tally.high, m=tally.medium, l=tally.low;
     totals.critical+=c; totals.high+=h; totals.medium+=m; totals.low+=l;
+
+    const mism = ["critical","high","medium","low"]
+      .filter(k => (claimed[k]||0) !== tally[k])
+      .map(k => `${k}: summary says ${claimed[k]||0}, counted ${tally[k]}`);
+    if (mism.length) mismatches.push({ unit, fy:r.fy, detail:mism });
 
     let repeatedCount=0, newCount=0;
     (j.areas||[]).forEach(area=>{
-      (area.observations||[]).forEach(obs=>{
-        if (obs.is_repeated) repeatedCount++; else newCount++;
+      const areaName = area.area_name || "Unspecified";
+      (area.observations||[]).forEach((obs,oi)=>{
+        const rec = { ...obs, unit, fy:r.fy, area:areaName, reportId:r.id, key:`${r.id}-${areaName}-${oi}` };
+        allObs.push(rec);
+        if (obs.is_repeated) {
+          repeatedCount++;
+          if(!repeatedObsByArea[areaName]) repeatedObsByArea[areaName]={};
+          repeatedObsByArea[areaName][unit] = (repeatedObsByArea[areaName][unit]||0)+1;
+        } else newCount++;
         const rc = obs.root_cause || "Not stated";
         rootCauseMap[rc] = (rootCauseMap[rc]||0) + 1;
+        const fi = parseImpact(obs.financial_impact);
+        if (fi.amount > 0) {
+          const cat = fi.category;
+          if(!finImpactMap[cat]) finImpactMap[cat]={ category:cat, total:0, byUnit:{}, obs:[] };
+          finImpactMap[cat].total += fi.amount;
+          finImpactMap[cat].byUnit[unit] = (finImpactMap[cat].byUnit[unit]||0) + fi.amount;
+          finImpactMap[cat].obs.push(rec);
+        }
       });
     });
 
-    units.push({ unitName:r.unit_name, fy:r.fy, rating:j.report_metadata?.overall_rating||"",
-      critical:c,high:h,medium:m,low:l, total:c+h+m+l, repeatedCount, newCount });
+    (j.previous_audit_noncompliance||[]).forEach(p=>{
+      const areaName = p.area || "Unspecified";
+      const rec = { title:p.title, area:areaName, unit, fy:r.fy, risk_level:"—",
+        action_plan:p.action_plan, target_date:p.target_date, responsible:p.responsible,
+        pending_since_days:p.pending_since_days, is_prior:true, reportId:r.id,
+        key:`${r.id}-prior-${areaName}-${p.title}` };
+      priorObs.push(rec);
+      if(!priorOpenByArea[areaName]) priorOpenByArea[areaName]={};
+      priorOpenByArea[areaName][unit] = (priorOpenByArea[areaName][unit]||0)+1;
+    });
 
-    if(!repeatedByUnit[r.unit_name]) repeatedByUnit[r.unit_name]=[];
-    repeatedByUnit[r.unit_name].push({ fy:r.fy, repeated:repeatedCount, new:newCount, total:repeatedCount+newCount });
+    const limCount = (j.limitations||[]).reduce((n,x)=>n+((x.items||[]).length),0);
+    units.push({ unitName:unit, fy:r.fy, rating:j.report_metadata?.overall_rating||"",
+      critical:c,high:h,medium:m,low:l, total:c+h+m+l, repeatedCount, newCount,
+      limitations:limCount, reportId:r.id,
+      areas:(j.areas||[]).reduce((acc,a)=>{
+        const nm=a.area_name||"Unspecified";
+        const t={c:0,h:0,m:0,l:0,t:0};
+        (a.observations||[]).forEach(o=>{
+          const k=String(o.risk_level||"").toLowerCase();
+          if(k==="critical")t.c++; else if(k==="high")t.h++; else if(k==="medium")t.m++; else if(k==="low")t.l++;
+          t.t++;
+        });
+        acc[nm]=t; return acc; },{}) });
 
-    (j.audit_summary?.area_wise_summary||[]).forEach(row=>{
-      if(!areaMap[row.area]) areaMap[row.area]={area:row.area,critical:0,high:0,medium:0,low:0,total:0,units:new Set()};
-      const a=areaMap[row.area];
-      a.critical+=row.critical||0; a.high+=row.high||0; a.medium+=row.medium||0; a.low+=row.low||0; a.total+=row.total||0;
-      a.units.add(r.unit_name);
+    if(!repeatedByUnit[unit]) repeatedByUnit[unit]=[];
+    repeatedByUnit[unit].push({ fy:r.fy, repeated:repeatedCount, new:newCount, total:repeatedCount+newCount });
+
+    (j.areas||[]).forEach(ar=>{
+      const nm=ar.area_name||"Unspecified";
+      if(!areaMap[nm]) areaMap[nm]={area:nm,critical:0,high:0,medium:0,low:0,total:0,units:new Set()};
+      const a=areaMap[nm];
+      (ar.observations||[]).forEach(o=>{
+        const k=String(o.risk_level||"").toLowerCase();
+        if(a[k]!==undefined)a[k]++;
+        a.total++;
+      });
+      a.units.add(unit);
     });
 
     (j.limitations||[]).forEach(lim=>{
       if(!lim.area || !(lim.items||[]).length) return;
       if(!limitationsMap[lim.area]) limitationsMap[lim.area]={area:lim.area, units:new Set(), itemsByUnit:{}};
-      limitationsMap[lim.area].units.add(r.unit_name);
-      limitationsMap[lim.area].itemsByUnit[r.unit_name] = lim.items;
+      limitationsMap[lim.area].units.add(unit);
+      limitationsMap[lim.area].itemsByUnit[unit] = lim.items;
     });
   });
 
-  const areaRollup = Object.values(areaMap).map(a=>({...a,unitCount:a.units.size})).sort((a,b)=>b.total-a.total);
+  // Common observations come from the curated list the audit team uploads via
+  // the Staff Portal — they are never auto-detected.
+  const groupMap = {};
+  (commonRows||[]).forEach(row=>{
+    const g = row.group_label;
+    if(!groupMap[g]) groupMap[g]={ title:g, process:row.area||"", risk:row.risk_level||"Low", units:new Set(), obs:[] };
+    groupMap[g].units.add(row.unit_name);
+    if (RISK_ORDER.indexOf(row.risk_level) >= 0 &&
+        RISK_ORDER.indexOf(row.risk_level) < RISK_ORDER.indexOf(groupMap[g].risk)) groupMap[g].risk = row.risk_level;
+    const match = allObs.find(o=>o.unit===row.unit_name &&
+      (o.title||"").trim().toLowerCase() === String(row.title||"").trim().toLowerCase());
+    groupMap[g].obs.push(match || { title:row.title, unit:row.unit_name, area:row.area,
+      risk_level:row.risk_level, fy:"", key:`curated-${g}-${row.unit_name}` });
+  });
+  const commonObservations = Object.values(groupMap)
+    .filter(x=>x.units.size>1)
+    .map(x=>({ ...x, unitList:[...x.units] }))
+    .sort((a,b)=>b.units.size-a.units.size);
+
+  const areaRollup = Object.values(areaMap).map(a=>({...a,unitCount:a.units.size,unitList:[...a.units]})).sort((a,b)=>b.total-a.total);
   const limitationsRollup = Object.values(limitationsMap).map(l=>({...l,unitCount:l.units.size})).sort((a,b)=>b.unitCount-a.unitCount);
   Object.values(repeatedByUnit).forEach(arr=>arr.sort((a,b)=>String(a.fy).localeCompare(String(b.fy))));
   const repeatedTotals = units.reduce((acc,u)=>({repeated:acc.repeated+u.repeatedCount, new:acc.new+u.newCount}),{repeated:0,new:0});
   const rootCauseRollup = Object.entries(rootCauseMap).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value);
+  const finImpact = Object.values(finImpactMap).sort((a,b)=>b.total-a.total);
+
+  units.forEach(u=>{
+    const ar = Object.entries(u.areas);
+    u.weakestArea = ar.length ? ar.sort((a,b)=>b[1].t-a[1].t)[0][0] + ` (${ar.sort((a,b)=>b[1].t-a[1].t)[0][1].t})` : "—";
+    const crit = ar.filter(([,v])=>v.c>0).sort((a,b)=>b[1].c-a[1].c);
+    u.highestCriticalArea = crit.length ? `${crit[0][0]} (${crit[0][1].c})` : "—";
+  });
 
   return {
     totals:{...totals,total:totals.critical+totals.high+totals.medium+totals.low},
     units:units.sort((a,b)=>b.total-a.total),
     areaRollup, limitationsRollup, repeatedByUnit, repeatedTotals, rootCauseRollup,
+    allObs, priorObs, commonObservations, finImpact, repeatedObsByArea, priorOpenByArea, mismatches,
+    unitNames:[...new Set(units.map(u=>u.unitName))],
   };
 }
 
-// ── Consolidated (company-wide) view — automatically built from Live reports ─
-function ConsolidatedView({ clientName, reports, onSelectUnit }) {
-  const [openArea,setOpenArea]=useState(null);
-  const [openLim,setOpenLim]=useState(null);
-  if(!reports.length) return null;
-  const { totals, units, areaRollup, limitationsRollup, repeatedByUnit, repeatedTotals, rootCauseRollup } = buildConsolidated(reports);
-  const findReport = unitName => reports.find(r=>r.unit_name===unitName);
+// Parse "financial_impact" free text into a numeric amount (in ₹ Lakhs) + category
+function parseImpact(txt) {
+  if (!txt || typeof txt !== "string") return { amount:0, category:"" };
+  const s = txt.trim();
+  if (/^(not applicable|not provided|n\/?a|—|-)$/i.test(s)) return { amount:0, category:"" };
+  const num = parseFloat((s.match(/[\d,]+(?:\.\d+)?/)||["0"])[0].replace(/,/g,""));
+  if (!num) return { amount:0, category:"" };
+  let lakhs = num;
+  if (/crore|\bcr\b/i.test(s)) lakhs = num * 100;
+  else if (/lakh|\bl\b/i.test(s)) lakhs = num;
+  else lakhs = num / 100000;               // bare rupees
+  let category = "Already Incurred Losses";
+  if (/saving|recover|opportunit/i.test(s)) category = "Potential Revenue / Savings";
+  else if (/potential|future|risk|expos/i.test(s)) category = "Potential Future Losses";
+  else if (/missed|lost|foregone/i.test(s)) category = "Missed Revenue / Savings";
+  return { amount: Math.round(lakhs*100)/100, category };
+}
+
+const FI_DESC = {
+  "Potential Revenue / Savings": "Earnings Opportunities — amounts the company could still realise by acting on the observation.",
+  "Potential Future Losses":     "Risks to Mitigate — amounts at risk of being lost if the observation is not addressed.",
+  "Missed Revenue / Savings":    "Lost Opportunities — amounts that could have been earned or saved but no longer can be.",
+  "Already Incurred Losses":     "Controllable Losses — amounts already lost, which better controls would have prevented.",
+};
+const FI_COLOR = {
+  "Potential Revenue / Savings": { col:"#059669", bg:"#F0FDF4" },
+  "Potential Future Losses":     { col:"#D97706", bg:"#FFFBEB" },
+  "Missed Revenue / Savings":    { col:"#DC2626", bg:"#FEF2F2" },
+  "Already Incurred Losses":     { col:"#7C3AED", bg:"#F5F3FF" },
+};
+
+// ── Shared table styles (matches approved SIIPL layout) ──────────────────
+const THs = (align="center") => ({ padding:"9px 12px", textAlign:align, color:P.muted, fontSize:11,
+  fontWeight:700, letterSpacing:.4, borderBottom:`2px solid ${P.border}`, background:"#F8FAFC", whiteSpace:"nowrap" });
+const TDs = (align="center", extra={}) => ({ padding:"9px 12px", textAlign:align, fontSize:13, ...extra });
+const UNIT_PALETTE = ["#3B82F6","#F97316","#8B5CF6","#10B981","#EC4899","#0EA5E9","#F43F5E","#84CC16"];
+const unitColor = (name, all) => UNIT_PALETTE[Math.max(0, all.indexOf(name)) % UNIT_PALETTE.length];
+
+const Section = ({ title, sub, accent=P.blue, children }) => (
+  <div style={{ background:P.white, borderRadius:12, border:`1px solid ${P.border}`, padding:"24px 28px", marginBottom:20 }}>
+    <div style={{ display:"flex", alignItems:"flex-start", gap:12, marginBottom:20, paddingBottom:16, borderBottom:`1px solid #F1F5F9` }}>
+      <div style={{ width:4, minHeight:40, background:accent, borderRadius:2, flexShrink:0, marginTop:2 }} />
+      <div>
+        <div style={{ fontSize:16, fontWeight:800, color:P.ink, lineHeight:1.3 }}>{title}</div>
+        {sub && <div style={{ fontSize:12, color:P.muted, marginTop:4 }}>{sub}</div>}
+      </div>
+    </div>
+    {children}
+  </div>
+);
+
+function Stack({ c=0,h=0,m=0,l=0,t,height=7 }) {
+  if(!t) return <div style={{height,background:P.border,borderRadius:3}}/>;
+  return <div style={{display:"flex",height,borderRadius:3,overflow:"hidden",gap:1}}>
+    {[{v:c,col:RISK.Critical},{v:h,col:RISK.High},{v:m,col:RISK.Medium},{v:l,col:RISK.Low}]
+      .map((s,i)=>s.v>0&&<div key={i} style={{flex:s.v,background:s.col}}/>)}
+  </div>;
+}
+
+// Clickable number — the drill-down trigger used across every tab
+const Num = ({ value, color, onClick, bold }) => {
+  if (!value) return <span style={{color:"#D1D5DB"}}>—</span>;
+  return <span onClick={onClick} title="Click to see the observations behind this number"
+    style={{ background:(color||P.slate)+"18", color:color||P.slate, borderRadius:5, padding:"2px 10px",
+      fontWeight:bold?800:700, fontSize:12, cursor:onClick?"pointer":"default",
+      textDecoration:onClick?"underline dotted":"none", textUnderlineOffset:3 }}>{value}</span>;
+};
+
+// ── Drill-down panel: shows the actual observations behind any number ────
+function DrillPanel({ title, obs, onClose }) {
+  const [openIdx,setOpenIdx]=useState(null);
   return (
-    <div style={{ marginBottom:28 }}>
-      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"24px", marginBottom:18 }}>
-        <h2 style={{ fontSize:20, fontWeight:900, color:P.slate, marginBottom:4 }}>Company Overview</h2>
-        <div style={{ fontSize:13, color:P.muted }}>Consolidated across {units.length} unit{units.length>1?"s":""}</div>
-      </div>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:12, marginBottom:18 }}>
-        {[["Total Observations",totals.total,P.slate],["Critical",totals.critical,RISK.Critical],["High",totals.high,RISK.High],
-          ["Medium",totals.medium,RISK.Medium],["Low",totals.low,RISK.Low]].map(([l,v,c])=>(
-          <div key={l} style={{ background:P.white, borderRadius:12, border:`1px solid ${P.border}`, padding:"18px" }}>
-            <div style={{ fontSize:11, fontWeight:700, color:P.muted, letterSpacing:.5, marginBottom:6 }}>{l.toUpperCase()}</div>
-            <div style={{ fontSize:28, fontWeight:900, color:c }}>{v}</div>
+    <div style={{ position:"fixed", inset:0, zIndex:80, display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
+      <div onClick={onClose} style={{ position:"absolute", inset:0, background:"rgba(15,23,42,.45)" }}/>
+      <div style={{ position:"relative", background:P.white, width:"100%", maxWidth:1000, maxHeight:"85vh",
+        borderRadius:"16px 16px 0 0", display:"flex", flexDirection:"column", boxShadow:"0 -8px 40px rgba(0,0,0,.2)" }}>
+        <div style={{ padding:"18px 24px", borderBottom:`1px solid ${P.border}`, display:"flex",
+          justifyContent:"space-between", alignItems:"center", gap:12 }}>
+          <div>
+            <div style={{ fontSize:15, fontWeight:800, color:P.ink }}>{title}</div>
+            <div style={{ fontSize:12, color:P.muted, marginTop:2 }}>{obs.length} observation{obs.length===1?"":"s"} · click any row for full detail</div>
           </div>
-        ))}
-      </div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:18 }}>
-        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px" }}>
-          <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:2 }}>Observations by Risk Level</div>
-          <div style={{ fontSize:12, color:P.muted, marginBottom:8 }}>Across all units</div>
-          <RiskDonut risk={totals}/>
+          <button onClick={onClose} style={{ background:"#F1F5F9", border:"none", borderRadius:8, width:34, height:34,
+            fontSize:17, color:P.muted, cursor:"pointer", flexShrink:0 }}>✕</button>
         </div>
-        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px" }}>
-          <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:2 }}>Observations by Root Cause</div>
-          <div style={{ fontSize:12, color:P.muted, marginBottom:8 }}>Across all units</div>
-          <RootCauseDonut rootCauseRollup={rootCauseRollup}/>
-        </div>
-      </div>
-      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px", marginBottom:18 }}>
-        <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:14 }}>Unit-wise Comparison</div>
-        <UnitBarChart units={units}/>
-        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13, marginTop:16 }}>
-          <thead><tr style={{ background:"#F8FAFC" }}>
-            {["Unit","FY","Rating","Critical","High","Medium","Low","Total"].map(h=>(
-              <th key={h} style={{ padding:"9px 12px", textAlign:h==="Unit"||h==="FY"||h==="Rating"?"left":"center", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
-            ))}
-          </tr></thead>
-          <tbody>
-            {units.map((u,i)=>(
-              <tr key={i} onClick={()=>onSelectUnit&&onSelectUnit(findReport(u.unitName))}
-                style={{ borderBottom:`1px solid ${P.border}`, background:i%2===0?P.white:"#FAFAFA", cursor:onSelectUnit?"pointer":"default" }}>
-                <td style={{ padding:"10px 12px", fontWeight:700, color:P.slate }}>{u.unitName}</td>
-                <td style={{ padding:"10px 12px", color:P.mid }}>{u.fy}</td>
-                <td style={{ padding:"10px 12px", color:P.mid }}>{u.rating||"—"}</td>
-                {[u.critical,u.high,u.medium,u.low].map((v,vi)=>(
-                  <td key={vi} style={{ padding:"10px 12px", textAlign:"center", fontWeight:700, color:[RISK.Critical,RISK.High,RISK.Medium,RISK.Low][vi] }}>{v||"—"}</td>
-                ))}
-                <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:800, color:P.slate }}>{u.total}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px" }}>
-        <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:6 }}>Common Observation Areas</div>
-        <div style={{ fontSize:12, color:P.muted, marginBottom:16 }}>Areas rolled up across all units — click to see which units are affected.</div>
-        {areaRollup.map(row=>{
-          const isOpen=openArea===row.area;
-          return (
-            <div key={row.area} style={{ marginBottom:8, border:`1px solid ${isOpen?P.blueBd:P.border}`, borderRadius:10, overflow:"hidden" }}>
-              <div onClick={()=>setOpenArea(isOpen?null:row.area)}
-                style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", cursor:"pointer", background:isOpen?P.blueLt:P.white }}>
-                <span style={{ fontSize:12, color:P.muted, transform:isOpen?"rotate(90deg)":"none" }}>▶</span>
-                <div style={{ flex:1, fontWeight:700, color:P.slate, fontSize:14 }}>{row.area}</div>
-                <span style={{ fontSize:11, color:P.muted }}>{row.unitCount} unit{row.unitCount>1?"s":""} affected</span>
-                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                  {[["C",row.critical,RISK.Critical],["H",row.high,RISK.High],["M",row.medium,RISK.Medium],["L",row.low,RISK.Low]]
-                    .map(([k,v,c])=>v>0?<span key={k} style={{ background:c, color:"#fff", borderRadius:5, padding:"2px 8px", fontSize:11, fontWeight:800 }}>{k} {v}</span>:null)}
+        <div style={{ overflowY:"auto", padding:"8px 0" }}>
+          {obs.length===0 && <div style={{ padding:40, textAlign:"center", color:P.muted, fontSize:13 }}>No observations found.</div>}
+          {obs.map((o,i)=>(
+            <div key={o.key||i}>
+              <div onClick={()=>setOpenIdx(openIdx===i?null:i)}
+                style={{ display:"flex", gap:12, alignItems:"center", padding:"12px 24px", cursor:"pointer",
+                  borderBottom:`1px solid ${P.border}`, background: openIdx===i ? "#F8FAFC" : "transparent" }}>
+                <span style={{ width:8, height:8, borderRadius:"50%", background:RISK[o.risk_level]||P.muted, flexShrink:0 }}/>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:13, fontWeight:600, color:P.slate }}>{o.title}</div>
+                  <div style={{ fontSize:11, color:P.muted, marginTop:2 }}>{o.unit} · {o.area} · FY {o.fy}</div>
                 </div>
-                <div style={{ fontSize:13, fontWeight:800, color:P.slate, minWidth:28, textAlign:"right" }}>{row.total}</div>
+                {o.is_repeated && <span style={{ background:P.amberLt, color:P.amber, border:`1px solid ${P.amberBd}`,
+                  borderRadius:5, padding:"2px 8px", fontSize:10, fontWeight:800, flexShrink:0 }}>REPEATED</span>}
+                <span style={{ background:(RISK[o.risk_level]||P.muted)+"18", color:RISK[o.risk_level]||P.muted,
+                  borderRadius:5, padding:"2px 9px", fontSize:11, fontWeight:700, flexShrink:0 }}>{o.risk_level}</span>
               </div>
-              {isOpen&&(
-                <div style={{ borderTop:`1px solid ${P.border}`, background:"#FBFCFE", padding:"12px 16px 12px 42px", fontSize:12, color:P.mid }}>
-                  Affected units: {[...row.units].join(", ")}
+              {openIdx===i && (
+                <div style={{ padding:"16px 24px 22px 44px", background:"#FBFCFE", borderBottom:`1px solid ${P.border}` }}>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, marginBottom:14 }}>
+                    {[["RESPONSIBLE",o.responsible],["TARGET DATE",o.target_date],["ROOT CAUSE",o.root_cause]].map(([k,v])=>(
+                      <div key={k}><div style={{fontSize:10,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:3}}>{k}</div>
+                        <div style={{fontSize:13,color:P.slate,fontWeight:600}}>{v||"—"}</div></div>
+                    ))}
+                  </div>
+                  {o.is_repeated && <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:8,
+                    padding:"8px 12px",marginBottom:14,fontSize:12,color:P.amber}}>
+                    <strong>Repeated from a prior audit</strong>{o.pending_since_days?` — pending ${o.pending_since_days} days`:""}</div>}
+                  {o.financial_impact && <div style={{background:"#FFF7ED",border:"1px solid #FED7AA",borderRadius:8,
+                    padding:"8px 12px",marginBottom:14,fontSize:12,color:"#9A3412"}}>
+                    <strong>Financial impact:</strong> {o.financial_impact}</div>}
+                  {o.observation && <div style={{marginBottom:14}}>
+                    <div style={{fontSize:10,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:4}}>OBSERVATION</div>
+                    <div style={{fontSize:13,color:P.mid,lineHeight:1.65}}>{o.observation}</div></div>}
+                  {o.action_plan && <div style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:8,padding:"12px 14px"}}>
+                    <div style={{fontSize:10,fontWeight:700,color:P.green,letterSpacing:.5,marginBottom:4}}>MANAGEMENT ACTION PLAN</div>
+                    <div style={{fontSize:13,color:"#166534",lineHeight:1.65}}>{o.action_plan}</div></div>}
                 </div>
               )}
             </div>
-          );
-        })}
-      </div>
-
-      {/* Repeated Observations — unit-wise, with FY-over-FY comparison */}
-      <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px", marginTop:18 }}>
-        <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:6 }}>Repeated Observations</div>
-        <div style={{ fontSize:12, color:P.muted, marginBottom:16 }}>Observations carried over from a prior audit, by unit. Where a unit has more than one report, the change from its last audit is shown.</div>
-        <div style={{ display:"flex", gap:12, marginBottom:16, flexWrap:"wrap" }}>
-          {[["Repeated",repeatedTotals.repeated,P.amber],["New",repeatedTotals.new,P.blue]].map(([l,v,c])=>(
-            <div key={l} style={{ flex:1, minWidth:120, background:c+"12", borderRadius:10, padding:"14px 16px" }}>
-              <div style={{ fontSize:11, fontWeight:700, color:c, letterSpacing:.5 }}>{l.toUpperCase()}</div>
-              <div style={{ fontSize:24, fontWeight:900, color:c, marginTop:4 }}>{v}</div>
-            </div>
           ))}
         </div>
-        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-          <thead><tr style={{ background:"#F8FAFC" }}>
-            {["Unit","FY","Repeated","New","Total","Repeat Rate","vs Last Audit"].map(h=>(
-              <th key={h} style={{ padding:"9px 12px", textAlign:(h==="Unit"||h==="FY")?"left":"center", color:P.muted, fontSize:11, fontWeight:700, borderBottom:`2px solid ${P.border}` }}>{h}</th>
-            ))}
-          </tr></thead>
-          <tbody>
-            {Object.entries(repeatedByUnit).flatMap(([unitName,rows])=>rows.map((row,i)=>{
-              const rate = row.total ? Math.round(row.repeated/row.total*100) : 0;
-              const prev = i>0 ? rows[i-1] : null;
-              const trend = prev ? (row.repeated>prev.repeated?"up":row.repeated<prev.repeated?"down":"flat") : null;
-              return (
-                <tr key={unitName+row.fy} style={{ borderBottom:`1px solid ${P.border}` }}>
-                  <td style={{ padding:"10px 12px", fontWeight:700, color:P.slate }}>{i===0?unitName:""}</td>
-                  <td style={{ padding:"10px 12px", color:P.mid }}>{row.fy}</td>
-                  <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:700, color:P.amber }}>{row.repeated}</td>
-                  <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:700, color:P.blue }}>{row.new}</td>
-                  <td style={{ padding:"10px 12px", textAlign:"center", fontWeight:800, color:P.slate }}>{row.total}</td>
-                  <td style={{ padding:"10px 12px", textAlign:"center", color:P.mid }}>{rate}%</td>
-                  <td style={{ padding:"10px 12px", textAlign:"center" }}>
-                    {trend==="up"&&<span style={{ color:P.red, fontWeight:800, fontSize:12 }}>▲ Worse</span>}
-                    {trend==="down"&&<span style={{ color:P.green, fontWeight:800, fontSize:12 }}>▼ Better</span>}
-                    {trend==="flat"&&<span style={{ color:P.muted, fontSize:12 }}>— Same</span>}
-                    {!prev&&<span style={{ color:P.muted, fontSize:11 }}>first report</span>}
-                  </td>
-                </tr>
-              );
-            }))}
-          </tbody>
-        </table>
       </div>
-
-      {/* Scope Limitations — unit-wise & consolidated */}
-      {limitationsRollup.length>0 && (
-        <div style={{ background:P.white, borderRadius:14, border:`1px solid ${P.border}`, padding:"22px", marginTop:18 }}>
-          <div style={{ fontSize:15, fontWeight:800, color:P.slate, marginBottom:6 }}>Scope Limitations</div>
-          <div style={{ fontSize:12, color:P.muted, marginBottom:16 }}>Data not made available during the audit, rolled up by area — click to see which units and what was missing.</div>
-          {limitationsRollup.map(row=>{
-            const isOpen=openLim===row.area;
-            return (
-              <div key={row.area} style={{ marginBottom:8, border:`1px solid ${isOpen?P.blueBd:P.border}`, borderRadius:10, overflow:"hidden" }}>
-                <div onClick={()=>setOpenLim(isOpen?null:row.area)}
-                  style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", cursor:"pointer", background:isOpen?P.blueLt:P.white }}>
-                  <span style={{ fontSize:12, color:P.muted, transform:isOpen?"rotate(90deg)":"none" }}>▶</span>
-                  <div style={{ flex:1, fontWeight:700, color:P.slate, fontSize:14 }}>{row.area}</div>
-                  <span style={{ fontSize:11, color:P.muted }}>{row.unitCount} unit{row.unitCount>1?"s":""} affected</span>
-                </div>
-                {isOpen&&(
-                  <div style={{ borderTop:`1px solid ${P.border}`, background:"#FBFCFE", padding:"12px 16px" }}>
-                    {Object.entries(row.itemsByUnit).map(([unitName,items])=>(
-                      <div key={unitName} style={{ marginBottom:10 }}>
-                        <div style={{ fontSize:12, fontWeight:700, color:P.slate, marginBottom:4 }}>{unitName}</div>
-                        <div style={{ fontSize:12, color:P.mid, paddingLeft:12 }}>
-                          {items.map((it,ii)=>(<div key={ii}>• {it}</div>))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }
 
-function readableError(err){
-  const raw=(err&&(err.message||err.error_description))||""; const st=err&&err.status;
-  if(st===429||/rate limit|too many/i.test(raw)) return "Too many attempts. Please wait a minute and try again.";
-  if(st===500||/unexpected_failure/i.test(raw)) return "Email could not be sent. Please contact NCLS & Associates.";
-  if(/expired|invalid/i.test(raw)) return "That code is invalid or expired. Request a new one.";
-  return raw||"Something went wrong. Please try again.";
-}
+// ── The 9-tab consolidated view — every number is data-driven & clickable ─
+function ConsolidatedView({ clientName, reports, commonRows, onSelectUnit }) {
+  const [active,setActive]=useState("overview");
+  const [drill,setDrill]=useState(null);   // { title, obs }
+  const [selUnit,setSelUnit]=useState(null);
+  const [filter,setFilter]=useState("All");
+  const [openLim,setOpenLim]=useState(null);
 
-const Btn=({children,onClick,color="blue",size="md",outline,full,disabled})=>{
-  const C={blue:{bg:P.blue,t:"#fff",b:P.blue},gray:{bg:"#F1F5F9",t:P.mid,b:P.border},red:{bg:P.red,t:"#fff",b:P.red}};
-  const c=C[color]||C.blue; const pad=size==="sm"?"5px 12px":size==="lg"?"12px 24px":"8px 18px";
-  return <button onClick={onClick} disabled={disabled} style={{background:outline?"transparent":(disabled?"#E2E8F0":c.bg),
-    color:outline?c.bg:(disabled?P.muted:c.t),border:`1.5px solid ${disabled?P.border:c.b}`,borderRadius:8,padding:pad,
-    fontWeight:700,fontSize:size==="sm"?12:13,cursor:disabled?"not-allowed":"pointer",width:full?"100%":"auto"}}>{children}</button>;
-};
+  const D = buildConsolidated(reports, commonRows);
+  const U = D.unitNames;
+  if (!reports.length) return null;
+  const uc = n => unitColor(n, U);
+  const show = (title, obs) => setDrill({ title, obs });
+  const by = f => D.allObs.filter(f);
 
-// ── LOGIN ─────────────────────────────────────────────────────────────────
-function LoginScreen(){
-  const [email,setEmail]=useState(""); const [code,setCode]=useState("");
-  const [step,setStep]=useState("email"); const [busy,setBusy]=useState(false); const [error,setError]=useState("");
-  const send=async()=>{ setError(""); const em=email.trim().toLowerCase();
-    if(!em.includes("@")){setError("Please enter a valid email address.");return;}
-    setBusy(true);
-    const {error:err}=await sb.auth.signInWithOtp({email:em,options:{shouldCreateUser:true}});
-    setBusy(false); if(err){setError(readableError(err));return;} setStep("code"); };
-  const verify=async()=>{ setError("");
-    if(code.trim().length<6){setError("Please enter the code from your email.");return;}
-    setBusy(true);
-    const {error:err}=await sb.auth.verifyOtp({email:email.trim().toLowerCase(),token:code.trim(),type:"email"});
-    setBusy(false); if(err){setError(readableError(err));} };
+  const NAV = [
+    { id:"overview",    label:"Overview" },
+    { id:"keyinst",     label:"Key Instances" },
+    { id:"financial",   label:"Financial Impact" },
+    { id:"comparative", label:"Comparative Analysis" },
+    { id:"areawise",    label:"Area-wise" },
+    { id:"common",      label:"Common Observations" },
+    { id:"repeated",    label:"Repeated Observations" },
+    { id:"prioryear",   label:"Prior Year Open" },
+    { id:"limitations", label:"Limitations" },
+  ];
+
+  // ---- Key instances, computed from actual data ----
+  const topObs = [...D.units].sort((a,b)=>b.total-a.total)[0];
+  const topCrit = [...D.units].sort((a,b)=>b.critical-a.critical)[0];
+  const topRep  = [...D.units].sort((a,b)=>b.repeatedCount-a.repeatedCount)[0];
+  const topLim  = [...D.units].sort((a,b)=>b.limitations-a.limitations)[0];
+  const keyInstances = [
+    topObs && { metric:String(topObs.total), label:`${topObs.unitName} had the highest number of observations (${topObs.total}) of the ${D.totals.total} raised across all units.`,
+      obs: by(o=>o.unit===topObs.unitName), t:`All observations — ${topObs.unitName}` },
+    topCrit && topCrit.critical>0 && { metric:String(topCrit.critical), label:`${topCrit.unitName} had the most critical observations — ${topCrit.critical} of ${D.totals.critical} critical across all units.`,
+      obs: by(o=>o.unit===topCrit.unitName&&o.risk_level==="Critical"), t:`Critical observations — ${topCrit.unitName}` },
+    topRep && topRep.repeatedCount>0 && { metric:String(topRep.repeatedCount), label:`${topRep.unitName} had the most repeated observations (${topRep.repeatedCount} of ${D.repeatedTotals.repeated} total) — issues not actioned since the prior audit.`,
+      obs: by(o=>o.unit===topRep.unitName&&o.is_repeated), t:`Repeated observations — ${topRep.unitName}` },
+    topLim && topLim.limitations>0 && { metric:String(topLim.limitations), label:`${topLim.unitName} had the highest number of scope limitations (${topLim.limitations}) — data not made available to the auditors.` },
+    { metric:String(D.totals.total), label:`${D.totals.total} total observations across ${U.length} unit${U.length===1?"":"s"}, of which ${D.totals.critical} are critical and ${D.totals.high} high risk.`,
+      obs: D.allObs, t:"All observations" },
+  ].filter(Boolean);
+
   return (
-    <div style={{minHeight:"100vh",background:P.ink,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
-      <div style={{width:"100%",maxWidth:420}}>
-        <div style={{textAlign:"center",marginBottom:36}}>
-          <div style={{display:"inline-flex",alignItems:"center",gap:10,marginBottom:16}}>
-            <div style={{width:40,height:40,background:P.blue,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,fontWeight:900,color:"#fff"}}>N</div>
-            <div style={{textAlign:"left"}}>
-              <div style={{fontWeight:800,color:"#F8FAFC",fontSize:16}}>NCLS & Associates</div>
-              <div style={{fontSize:11,color:P.muted}}>Chartered Accountants</div></div>
-          </div>
-          <div style={{fontSize:22,fontWeight:800,color:"#F8FAFC",marginBottom:6}}>Audit Dashboard</div>
-          <div style={{fontSize:13,color:P.muted}}>Sign in with your registered email address</div>
+    <div style={{ marginBottom:28 }}>
+      {/* Tab nav */}
+      <div style={{ background:P.white, border:`1px solid ${P.border}`, borderRadius:12, padding:"0 8px",
+        marginBottom:20, overflowX:"auto" }}>
+        <div style={{ display:"flex" }}>
+          {NAV.map(it=>(
+            <button key={it.id} onClick={()=>setActive(it.id)} style={{ background:"transparent", border:"none",
+              padding:"13px 16px", fontWeight:active===it.id?800:500, fontSize:13,
+              color:active===it.id?P.blue:P.muted, cursor:"pointer", whiteSpace:"nowrap",
+              borderBottom:active===it.id?`3px solid ${P.blue}`:"3px solid transparent" }}>{it.label}</button>
+          ))}
         </div>
-        <div style={{background:"#1C2333",borderRadius:16,padding:"32px 28px",border:"1px solid #2D3748"}}>
-          {step==="email"?(<>
-            <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>EMAIL ADDRESS</label>
-            <input value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder="you@company.com" autoFocus
-              style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:14,outline:"none",marginBottom:8}}/>
-            {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
-            <button onClick={send} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginTop:6,cursor:"pointer"}}>
-              {busy?"Sending code...":"Send One-Time Code →"}</button>
-          </>):(<>
-            <div style={{fontSize:13,color:P.muted,marginBottom:18}}>Code sent to <strong style={{color:"#93C5FD"}}>{email}</strong>. Check your inbox and spam folder.</div>
-            <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>SIGN-IN CODE</label>
-            <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,8))} onKeyDown={e=>e.key==="Enter"&&verify()}
-              placeholder="Enter code" autoFocus maxLength={8}
-              style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:22,fontWeight:800,letterSpacing:6,textAlign:"center",outline:"none",marginBottom:8}}/>
-            {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
-            <button onClick={verify} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginBottom:12,cursor:"pointer"}}>
-              {busy?"Verifying...":"Verify & Sign In →"}</button>
-            <div style={{textAlign:"center",fontSize:12}}>
-              <span onClick={()=>{setStep("email");setCode("");setError("");}} style={{color:"#93C5FD",cursor:"pointer"}}>← Change email / resend</span></div>
-          </>)}
-        </div>
-        <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"#374151"}}>
-          Access is limited to email addresses registered by NCLS & Associates.</div>
       </div>
+
+      {/* ---------- OVERVIEW ---------- */}
+      {active==="overview" && (
+        <Section title={`${clientName} — Overview`} sub={`Units: ${U.join(", ")}`} accent={P.blue}>
+          {D.mismatches.length>0 && (
+            <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:10,padding:"12px 16px",marginBottom:20}}>
+              <div style={{fontSize:12,fontWeight:800,color:P.amber,marginBottom:6}}>⚠ Figures below are counted from the observations, and differ from the executive summary in the report</div>
+              {D.mismatches.map((m,i)=>(
+                <div key={i} style={{fontSize:12,color:P.amber,marginTop:3}}>
+                  <strong>{m.unit} (FY {m.fy})</strong> — {m.detail.join("; ")}
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:28 }}>
+            {[["Total Observations",D.totals.total,P.blue,"#EFF6FF",D.allObs,"All observations"],
+              ["Repeated Observations",D.repeatedTotals.repeated,P.amber,"#FFFBEB",by(o=>o.is_repeated),"All repeated observations"],
+              ["Prior Year Still Open",D.priorObs.length,P.purple,"#F5F3FF",D.priorObs,"Prior-year observations still open"]
+            ].map(([l,v,col,bg,ob,t])=>(
+              <div key={l} onClick={()=>ob&&show(t,ob)} style={{ background:bg, borderRadius:10, padding:"18px 20px", cursor:ob?"pointer":"default" }}>
+                <div style={{ fontSize:34, fontWeight:900, color:col, lineHeight:1 }}>{v}</div>
+                <div style={{ fontSize:12, color:P.muted, marginTop:6, fontWeight:600 }}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginBottom:28, overflowX:"auto" }}>
+            <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <thead><tr>{["UNIT","CRITICAL","HIGH","MEDIUM","LOW","TOTAL","SPLIT"].map(h=>
+                <th key={h} style={h==="UNIT"?THs("left"):THs()}>{h}</th>)}</tr></thead>
+              <tbody>
+                {D.units.map((u,i)=>(
+                  <tr key={u.unitName+u.fy} style={{ background:i%2===0?P.white:"#FAFAFA", borderBottom:`1px solid ${P.border}` }}>
+                    <td style={TDs("left",{fontWeight:700,color:P.ink})}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:uc(u.unitName),flexShrink:0}}/>
+                        <span onClick={()=>onSelectUnit&&onSelectUnit(reports.find(r=>r.id===u.reportId))}
+                          style={{cursor:"pointer",textDecoration:"underline dotted",textUnderlineOffset:3}}>{u.unitName}</span>
+                      </div></td>
+                    {["critical","high","medium","low"].map(k=>{
+                      const cap=k[0].toUpperCase()+k.slice(1);
+                      return <td key={k} style={TDs()}>
+                        <Num value={u[k]} color={RISK[cap]}
+                          onClick={()=>show(`${cap} observations — ${u.unitName}`, by(o=>o.unit===u.unitName&&o.risk_level===cap))}/>
+                      </td>;})}
+                    <td style={TDs("center")}><Num value={u.total} bold
+                      onClick={()=>show(`All observations — ${u.unitName}`, by(o=>o.unit===u.unitName))}/></td>
+                    <td style={{padding:"9px 12px"}}><Stack c={u.critical} h={u.high} m={u.medium} l={u.low} t={u.total} height={8}/></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          </Section>
+      )}
+
+      {/* ---------- KEY INSTANCES ---------- */}
+      {active==="keyinst" && (
+        <Section title="Key Instances — Audit at a Glance" sub="Standout findings across all units · click a card to see the observations behind it" accent={P.red}>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))", gap:14 }}>
+            {keyInstances.map((item,i)=>(
+              <div key={i} onClick={()=>item.obs&&show(item.t,item.obs)}
+                style={{ display:"flex", gap:16, alignItems:"flex-start", background:"#F8FAFC", borderRadius:10,
+                  padding:"16px 18px", borderLeft:`3px solid ${P.blue}`, cursor:item.obs?"pointer":"default" }}>
+                <div style={{ fontSize:26, fontWeight:900, color:P.blue, minWidth:64, lineHeight:1.1, flexShrink:0 }}>{item.metric}</div>
+                <div style={{ fontSize:13, color:P.mid, lineHeight:1.65 }}>{item.label}</div>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* ---------- FINANCIAL IMPACT ---------- */}
+      {active==="financial" && (() => {
+        const impObs = D.allObs.filter(o=>parseImpact(o.financial_impact).amount>0)
+          .map(o=>({...o, _amt:parseImpact(o.financial_impact).amount}))
+          .sort((a,b)=>b._amt-a._amt);
+        const total = impObs.reduce((a,o)=>a+o._amt,0);
+        const byUnit = {};
+        impObs.forEach(o=>{ byUnit[o.unit]=(byUnit[o.unit]||0)+o._amt; });
+        return (
+          <Section title="Observations with Financial Impact" sub="All amounts in ₹ Lakhs · click any row for full observation detail" accent={P.amber}>
+            {impObs.length===0 ? (
+              <div style={{padding:"30px",textAlign:"center",color:P.muted,fontSize:13}}>
+                No observations in the uploaded reports carry a quantified financial impact.
+              </div>
+            ) : (<>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:14, marginBottom:24 }}>
+                <div onClick={()=>show("All observations with a financial impact", impObs)}
+                  style={{ background:"#FFFBEB", borderRadius:10, padding:"18px 20px", cursor:"pointer" }}>
+                  <div style={{ fontSize:32, fontWeight:900, color:P.amber, lineHeight:1 }}>₹{total.toLocaleString("en-IN")} L</div>
+                  <div style={{ fontSize:12, color:P.muted, marginTop:6, fontWeight:600 }}>Total Financial Impact</div>
+                </div>
+                <div onClick={()=>show("All observations with a financial impact", impObs)}
+                  style={{ background:"#EFF6FF", borderRadius:10, padding:"18px 20px", cursor:"pointer" }}>
+                  <div style={{ fontSize:32, fontWeight:900, color:P.blue, lineHeight:1 }}>{impObs.length}</div>
+                  <div style={{ fontSize:12, color:P.muted, marginTop:6, fontWeight:600 }}>Observations Quantified</div>
+                </div>
+              </div>
+              <div style={{ overflowX:"auto", marginBottom:24 }}>
+                <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                  <thead><tr><th style={THs("left")}>UNIT</th><th style={THs("left")}>AREA</th>
+                    <th style={THs("left")}>OBSERVATION</th><th style={THs()}>RISK</th>
+                    <th style={THs("right")}>IMPACT (₹ L)</th></tr></thead>
+                  <tbody>
+                    {impObs.map((o,i)=>(
+                      <tr key={o.key||i} onClick={()=>show(o.title,[o])}
+                        style={{ background:i%2===0?P.white:"#FAFAFA", borderBottom:`1px solid ${P.border}`, cursor:"pointer" }}>
+                        <td style={TDs("left",{fontWeight:700,color:P.ink,whiteSpace:"nowrap"})}>
+                          <div style={{display:"flex",alignItems:"center",gap:7}}>
+                            <div style={{width:7,height:7,borderRadius:"50%",background:uc(o.unit)}}/>{o.unit}</div></td>
+                        <td style={TDs("left",{color:P.mid,fontSize:12,whiteSpace:"nowrap"})}>{o.area}</td>
+                        <td style={TDs("left",{color:P.slate,fontSize:12,maxWidth:340})}>{o.title}</td>
+                        <td style={TDs()}><span style={{background:(RISK[o.risk_level]||P.muted)+"18",
+                          color:RISK[o.risk_level]||P.muted,borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>{o.risk_level}</span></td>
+                        <td style={TDs("right",{fontWeight:800,color:P.amber})}>₹{o._amt.toLocaleString("en-IN")}</td>
+                      </tr>
+                    ))}
+                    <tr style={{ background:"#FFFBEB", borderTop:`2px solid ${P.amberBd}` }}>
+                      <td style={TDs("left",{fontWeight:800,color:P.ink})} colSpan={4}>Total</td>
+                      <td style={TDs("right",{fontWeight:900,color:P.amber})}>₹{total.toLocaleString("en-IN")}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display:"flex", gap:12, flexWrap:"wrap" }}>
+                {Object.entries(byUnit).sort((a,b)=>b[1]-a[1]).map(([n,v])=>(
+                  <div key={n} onClick={()=>show(`Financial impact — ${n}`, impObs.filter(o=>o.unit===n))}
+                    style={{ background:"#F8FAFC", border:`1px solid ${P.border}`, borderLeft:`4px solid ${uc(n)}`,
+                      borderRadius:9, padding:"12px 16px", minWidth:150, cursor:"pointer" }}>
+                    <div style={{fontSize:11,fontWeight:700,color:P.muted}}>{n.toUpperCase()}</div>
+                    <div style={{fontSize:22,fontWeight:900,color:P.amber,marginTop:3}}>₹{v.toLocaleString("en-IN")} L</div>
+                  </div>
+                ))}
+              </div>
+            </>)}
+          </Section>
+        );
+      })()}
+
+      {/* ---------- COMPARATIVE ---------- */}
+      {active==="comparative" && (
+        <Section title="Comparative Performance Analysis" sub="Red = worst in row · Green = best in row · click any figure for detail" accent={P.purple}>
+          <div style={{ overflowX:"auto", marginBottom:28 }}>
+            <table style={{ width:"100%", borderCollapse:"collapse" }}>
+              <thead><tr><th style={THs("left")}>CATEGORY</th>
+                {D.units.map(u=><th key={u.unitName+u.fy} style={THs()}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:uc(u.unitName)}}/>{u.unitName}</div></th>)}</tr></thead>
+              <tbody>
+                {[["Total Observations","total",true],["Critical","critical",true],["High","high",true],
+                  ["Medium","medium",false],["Low","low",false],["Repeated Obs","repeatedCount",true],
+                  ["Limitations","limitations",true]].map(([label,key,badHigh],i)=>{
+                  const vals=D.units.map(u=>u[key]).filter(v=>typeof v==="number");
+                  const max=Math.max(...vals),min=Math.min(...vals);
+                  return (
+                    <tr key={key} style={{ background:i%2===0?P.white:"#FAFAFA", borderBottom:`1px solid ${P.border}` }}>
+                      <td style={TDs("left",{fontWeight:600,color:P.mid})}>{label}</td>
+                      {D.units.map(u=>{
+                        const v=u[key];
+                        let hl={};
+                        if(badHigh&&v===max&&max!==min) hl={background:"#FEF2F2",color:P.red,fontWeight:800};
+                        else if(badHigh&&v===min&&max!==min) hl={background:P.greenLt,color:P.green,fontWeight:800};
+                        const capMap={critical:"Critical",high:"High",medium:"Medium",low:"Low"};
+                        const click = key==="total" ? ()=>show(`All observations — ${u.unitName}`,by(o=>o.unit===u.unitName))
+                          : capMap[key] ? ()=>show(`${capMap[key]} — ${u.unitName}`,by(o=>o.unit===u.unitName&&o.risk_level===capMap[key]))
+                          : key==="repeatedCount" ? ()=>show(`Repeated — ${u.unitName}`,by(o=>o.unit===u.unitName&&o.is_repeated)) : null;
+                        return <td key={u.unitName} onClick={click||undefined}
+                          style={{...TDs(),...hl,cursor:click?"pointer":"default"}}>{v ?? "—"}</td>;
+                      })}
+                    </tr>
+                  );
+                })}
+                <tr style={{ background:"#F8FAFC", borderTop:`2px solid ${P.border}` }}>
+                  <td style={TDs("left",{fontWeight:700,color:P.mid})}>Weakest Area</td>
+                  {D.units.map(u=><td key={u.unitName} style={TDs("center",{fontSize:11,color:P.muted})}>{u.weakestArea}</td>)}
+                </tr>
+                <tr style={{ background:"#F8FAFC" }}>
+                  <td style={TDs("left",{fontWeight:700,color:P.mid})}>Highest Critical Area</td>
+                  {D.units.map(u=><td key={u.unitName} style={TDs("center",{fontSize:11,color:P.red,fontWeight:600})}>{u.highestCriticalArea}</td>)}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          
+        </Section>
+      )}
+
+      {/* ---------- AREA-WISE ---------- */}
+      {active==="areawise" && (() => {
+        const sel = selUnit || U[0];
+        const u = D.units.find(x=>x.unitName===sel) || D.units[0];
+        return (
+          <Section title="Area-wise Observations" sub="Select a unit to view its breakdown · click any figure for detail" accent={P.green}>
+            <div style={{ display:"flex", gap:8, marginBottom:20, flexWrap:"wrap" }}>
+              {U.map(n=>(
+                <button key={n} onClick={()=>setSelUnit(n)} style={{ display:"flex", alignItems:"center", gap:6,
+                  background:sel===n?uc(n):"#F1F5F9", color:sel===n?"#fff":P.mid,
+                  border:`2px solid ${sel===n?uc(n):"transparent"}`, borderRadius:8, padding:"7px 16px",
+                  fontWeight:700, fontSize:13, cursor:"pointer" }}>
+                  <div style={{width:7,height:7,borderRadius:"50%",background:sel===n?"rgba(255,255,255,.6)":uc(n)}}/>{n}
+                </button>
+              ))}
+            </div>
+            <div style={{ display:"flex", gap:12, marginBottom:18, flexWrap:"wrap" }}>
+              {["critical","high","medium","low"].map(k=>{
+                const cap=k[0].toUpperCase()+k.slice(1);
+                return (
+                  <div key={k} onClick={()=>show(`${cap} — ${u.unitName}`,by(o=>o.unit===u.unitName&&o.risk_level===cap))}
+                    style={{ background:RISK[cap]+"14", border:`1px solid ${RISK[cap]}40`, borderRadius:9,
+                      padding:"10px 16px", minWidth:80, cursor:"pointer" }}>
+                    <div style={{fontSize:10,fontWeight:700,color:RISK[cap],letterSpacing:.5}}>{cap.toUpperCase()}</div>
+                    <div style={{fontSize:26,fontWeight:900,color:RISK[cap],lineHeight:1.1}}>{u[k]}</div>
+                  </div>
+                );
+              })}
+              <div onClick={()=>show(`All observations — ${u.unitName}`,by(o=>o.unit===u.unitName))}
+                style={{ background:"#F8FAFC", border:`1px solid ${P.border}`, borderRadius:9, padding:"10px 16px", minWidth:80, cursor:"pointer" }}>
+                <div style={{fontSize:10,fontWeight:700,color:P.muted,letterSpacing:.5}}>TOTAL</div>
+                <div style={{fontSize:26,fontWeight:900,color:P.ink,lineHeight:1.1}}>{u.total}</div>
+              </div>
+            </div>
+            <div style={{ marginBottom:18 }}>
+              <Stack c={u.critical} h={u.high} m={u.medium} l={u.low} t={u.total} height={10}/>
+            </div>
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                <thead><tr>{["AREA","CRITICAL","HIGH","MEDIUM","LOW","TOTAL","SPLIT"].map(h=>
+                  <th key={h} style={h==="AREA"?THs("left"):THs()}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {Object.entries(u.areas).sort((a,b)=>b[1].t-a[1].t).map(([area,v],i)=>(
+                    <tr key={area} style={{ background:i%2===0?P.white:"#FAFAFA", borderBottom:`1px solid ${P.border}` }}>
+                      <td style={TDs("left",{fontWeight:600,color:P.mid})}>
+                        <span onClick={()=>show(`${area} — ${u.unitName}`,by(o=>o.unit===u.unitName&&o.area===area))}
+                          style={{cursor:"pointer",textDecoration:"underline dotted",textUnderlineOffset:3}}>{area}</span></td>
+                      {["c","h","m","l"].map(k=>{
+                        const rk={c:"Critical",h:"High",m:"Medium",l:"Low"}[k];
+                        return <td key={k} style={TDs()}><Num value={v[k]} color={RISK[rk]}
+                          onClick={()=>show(`${rk} — ${area} · ${u.unitName}`,by(o=>o.unit===u.unitName&&o.area===area&&o.risk_level===rk))}/></td>;
+                      })}
+                      <td style={TDs("center")}><Num value={v.t} bold
+                        onClick={()=>show(`${area} — ${u.unitName}`,by(o=>o.unit===u.unitName&&o.area===area))}/></td>
+                      <td style={{padding:"9px 12px"}}><Stack c={v.c} h={v.h} m={v.m} l={v.l} t={v.t} height={6}/></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Section>
+        );
+      })()}
+
+      {/* ---------- COMMON OBSERVATIONS ---------- */}
+      {active==="common" && (() => {
+        const procs=["All",...new Set(D.commonObservations.map(o=>o.process))];
+        const list = filter==="All" ? D.commonObservations : D.commonObservations.filter(o=>o.process===filter);
+        return (
+          <Section title="Common Observations" sub="The same observation raised in more than one unit — systemic gaps needing head-office action" accent={P.blue}>
+            {D.commonObservations.length===0 ? (
+              <div style={{padding:30,textAlign:"center",color:P.muted,fontSize:13}}>
+                No common observations have been marked yet. The audit team sets these in the Staff Portal by downloading the observations Excel, marking which issues are common across units, and uploading it back.
+              </div>
+            ) : (<>
+              <div style={{ display:"flex", gap:8, marginBottom:18, flexWrap:"wrap" }}>
+                {procs.map(p=>(
+                  <button key={p} onClick={()=>setFilter(p)} style={{ background:filter===p?P.blue:"#F1F5F9",
+                    color:filter===p?"#fff":P.mid, border:"none", borderRadius:7, padding:"5px 14px",
+                    fontWeight:600, fontSize:12, cursor:"pointer" }}>{p}</button>
+                ))}
+              </div>
+              <div style={{ overflowX:"auto" }}>
+                <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                  <thead><tr>
+                    <th style={THs("left")}>PROCESS</th><th style={THs("left")}>OBSERVATION</th><th style={THs()}>RISK</th>
+                    {U.map(n=><th key={n} style={{...THs(),minWidth:70}}>
+                      <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+                        <div style={{width:7,height:7,borderRadius:"50%",background:uc(n)}}/>
+                        <span style={{fontSize:10}}>{n}</span></div></th>)}
+                    <th style={THs()}>UNITS</th></tr></thead>
+                  <tbody>
+                    {list.map((o,i)=>(
+                      <tr key={i} style={{ background:i%2===0?P.white:"#FAFAFA", borderBottom:`1px solid ${P.border}` }}>
+                        <td style={TDs("left",{fontWeight:600,color:P.mid,whiteSpace:"nowrap",fontSize:12})}>{o.process}</td>
+                        <td style={TDs("left",{color:P.slate,fontSize:12,maxWidth:300})}>
+                          <span onClick={()=>show(o.title,o.obs)} style={{cursor:"pointer",textDecoration:"underline dotted",textUnderlineOffset:3}}>{o.title}</span></td>
+                        <td style={TDs()}><span style={{background:(RISK[o.risk]||P.muted)+"18",color:RISK[o.risk]||P.muted,
+                          borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700}}>{o.risk}</span></td>
+                        {U.map(n=>(
+                          <td key={n} style={TDs()}>
+                            {o.unitList.includes(n)
+                              ? <span onClick={()=>show(`${o.title} — ${n}`,o.obs.filter(x=>x.unit===n))}
+                                  style={{color:P.green,fontSize:16,lineHeight:1,cursor:"pointer"}}>✓</span>
+                              : <span style={{color:"#E5E7EB",fontSize:13}}>—</span>}
+                          </td>
+                        ))}
+                        <td style={TDs()}><Num value={o.unitList.length} color={P.blue} onClick={()=>show(o.title,o.obs)}/></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>)}
+          </Section>
+        );
+      })()}
+
+      {/* ---------- REPEATED ---------- */}
+      {active==="repeated" && (() => {
+        const areas=Object.keys(D.repeatedObsByArea);
+        return (
+          <Section title="Repeated Observations" sub="Raised again this year — not actioned since the prior audit" accent={P.red}>
+            {areas.length===0 ? (
+              <div style={{padding:30,textAlign:"center",color:P.muted,fontSize:13}}>No repeated observations in the uploaded reports.</div>
+            ) : (<>
+              <div style={{ overflowX:"auto", marginBottom:24 }}>
+                <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                  <thead><tr style={{background:"#FEF2F2"}}>
+                    <th style={THs("left")}>PROCESS</th>
+                    {U.map(n=><th key={n} style={{...THs(),color:"#991B1B"}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                        <div style={{width:7,height:7,borderRadius:"50%",background:uc(n)}}/>{n}</div></th>)}
+                    <th style={{...THs(),color:"#991B1B"}}>TOTAL</th></tr></thead>
+                  <tbody>
+                    {areas.map((area,i)=>{
+                      const tot=U.reduce((a,n)=>a+(D.repeatedObsByArea[area][n]||0),0);
+                      return (
+                        <tr key={area} style={{ background:i%2===0?P.white:"#FAFAFA", borderBottom:`1px solid ${P.border}` }}>
+                          <td style={TDs("left",{fontWeight:600,color:P.mid})}>{area}</td>
+                          {U.map(n=><td key={n} style={TDs()}><Num value={D.repeatedObsByArea[area][n]||0} color={P.red}
+                            onClick={()=>show(`Repeated — ${area} · ${n}`,by(o=>o.area===area&&o.unit===n&&o.is_repeated))}/></td>)}
+                          <td style={TDs("center")}><Num value={tot} color={P.red} bold
+                            onClick={()=>show(`Repeated — ${area}`,by(o=>o.area===area&&o.is_repeated))}/></td>
+                        </tr>
+                      );
+                    })}
+                    <tr style={{ background:"#FEF2F2", borderTop:`2px solid ${P.redBd}` }}>
+                      <td style={TDs("left",{fontWeight:800,color:P.ink})}>Total</td>
+                      {U.map(n=>{const t=areas.reduce((a,ar)=>a+(D.repeatedObsByArea[ar][n]||0),0);
+                        return <td key={n} style={TDs("center",{fontWeight:900,color:P.red})}>{t}</td>;})}
+                      <td style={TDs("center",{fontWeight:900,color:P.red})}>{D.repeatedTotals.repeated}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              
+            </>)}
+          </Section>
+        );
+      })()}
+
+      {/* ---------- PRIOR YEAR OPEN ---------- */}
+      {active==="prioryear" && (() => {
+        const areas=Object.keys(D.priorOpenByArea);
+        const totalOpen = by(o=>o.is_repeated&&o.pending_since_days).length;
+        return (
+          <Section title="Previous Year Open Observations" sub="Raised in an earlier audit and still not closed" accent={P.purple}>
+            {areas.length===0 ? (
+              <div style={{padding:30,textAlign:"center",color:P.muted,fontSize:13}}>
+                No prior-year open observations recorded. These come from the report's "Previous Audit Non-Compliance" section. If the report has that section, re-extract it with the latest prompt.
+              </div>
+            ) : (<>
+              <div style={{ overflowX:"auto", marginBottom:24 }}>
+                <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                  <thead><tr style={{background:"#F5F3FF"}}>
+                    <th style={{...THs("left"),color:"#6D28D9"}}>PROCESS</th>
+                    {U.map(n=><th key={n} style={{...THs(),color:"#6D28D9"}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                        <div style={{width:7,height:7,borderRadius:"50%",background:uc(n)}}/>{n}</div></th>)}
+                    <th style={{...THs(),color:"#6D28D9"}}>TOTAL</th></tr></thead>
+                  <tbody>
+                    {areas.map((area,i)=>{
+                      const tot=U.reduce((a,n)=>a+(D.priorOpenByArea[area][n]||0),0);
+                      return (
+                        <tr key={area} style={{ background:i%2===0?P.white:"#FAFAFA", borderBottom:`1px solid ${P.border}` }}>
+                          <td style={TDs("left",{fontWeight:600,color:P.mid})}>{area}</td>
+                          {U.map(n=><td key={n} style={TDs()}><Num value={D.priorOpenByArea[area][n]||0} color={P.purple}
+                            onClick={()=>show(`Prior-year open — ${area} · ${n}`,by(o=>o.area===area&&o.unit===n&&o.is_repeated&&o.pending_since_days))}/></td>)}
+                          <td style={TDs("center")}><Num value={tot} color={P.purple} bold
+                            onClick={()=>show(`Prior-year open — ${area}`,by(o=>o.area===area&&o.is_repeated&&o.pending_since_days))}/></td>
+                        </tr>
+                      );
+                    })}
+                    <tr style={{ background:"#F5F3FF", borderTop:"2px solid #DDD6FE" }}>
+                      <td style={TDs("left",{fontWeight:800,color:P.ink})}>Total</td>
+                      {U.map(n=>{const t=areas.reduce((a,ar)=>a+(D.priorOpenByArea[ar][n]||0),0);
+                        return <td key={n} style={TDs("center",{fontWeight:900,color:P.purple})}>{t}</td>;})}
+                      <td style={TDs("center",{fontWeight:900,color:P.purple})}>{totalOpen}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              
+            </>)}
+          </Section>
+        );
+      })()}
+
+      {/* ---------- LIMITATIONS ---------- */}
+      {active==="limitations" && (
+        <Section title="Unit-wise Limitations" sub="Data not provided to the auditors — impacts completeness of findings" accent={P.muted}>
+          {D.limitationsRollup.length===0 ? (
+            <div style={{padding:30,textAlign:"center",color:P.muted,fontSize:13}}>No scope limitations recorded in the uploaded reports.</div>
+          ) : (<>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))", gap:14, marginBottom:20 }}>
+              {[...D.units].sort((a,b)=>b.limitations-a.limitations).map(u=>(
+                <div key={u.unitName+u.fy} style={{ background:u.limitations>20?"#FEF2F2":u.limitations>10?"#FFFBEB":P.greenLt,
+                  borderRadius:10, padding:"16px 18px", borderLeft:`4px solid ${uc(u.unitName)}` }}>
+                  <div style={{fontSize:11,fontWeight:700,color:P.muted,marginBottom:4}}>{u.unitName.toUpperCase()}</div>
+                  <div style={{fontSize:32,fontWeight:900,lineHeight:1,
+                    color:u.limitations>20?P.red:u.limitations>10?P.amber:P.green}}>{u.limitations}</div>
+                  <div style={{fontSize:11,color:P.muted,marginTop:4}}>limitations</div>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:13,fontWeight:700,color:P.mid,marginBottom:10}}>By Area — click to see what was not provided</div>
+            {D.limitationsRollup.map(row=>{
+              const open=openLim===row.area;
+              return (
+                <div key={row.area} style={{ marginBottom:8, border:`1px solid ${open?P.blueBd:P.border}`, borderRadius:10, overflow:"hidden" }}>
+                  <div onClick={()=>setOpenLim(open?null:row.area)}
+                    style={{ display:"flex", alignItems:"center", gap:12, padding:"12px 16px", cursor:"pointer", background:open?P.blueLt:P.white }}>
+                    <span style={{fontSize:12,color:P.muted,transform:open?"rotate(90deg)":"none"}}>▶</span>
+                    <div style={{flex:1,fontWeight:700,color:P.slate,fontSize:14}}>{row.area}</div>
+                    <span style={{fontSize:11,color:P.muted}}>{row.unitCount} unit{row.unitCount>1?"s":""} affected</span>
+                  </div>
+                  {open && (
+                    <div style={{ borderTop:`1px solid ${P.border}`, background:"#FBFCFE", padding:"12px 16px" }}>
+                      {Object.entries(row.itemsByUnit).map(([n,items])=>(
+                        <div key={n} style={{marginBottom:10}}>
+                          <div style={{fontSize:12,fontWeight:700,color:P.slate,marginBottom:4}}>{n}</div>
+                          <div style={{fontSize:12,color:P.mid,paddingLeft:12}}>{items.map((it,ii)=><div key={ii}>• {it}</div>)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>)}
+        </Section>
+      )}
+
+      {drill && <DrillPanel title={drill.title} obs={drill.obs} onClose={()=>setDrill(null)}/>}
     </div>
   );
 }
 
-// ── REPORT DETAIL ─────────────────────────────────────────────────────────
+
 function ReportView({ report, onBack, showToast }) {
   const [openArea,setOpenArea]=useState(null);
   const [openObs,setOpenObs]=useState(null);
@@ -531,6 +1019,7 @@ function App(){
   const [authState,setAuthState]=useState("loading");
   const [viewer,setViewer]=useState(null);
   const [reports,setReports]=useState([]);
+  const [commonRows,setCommonRows]=useState([]);
   const [openId,setOpenId]=useState(null);
   const [toast,setToast]=useState(null);
   const showToast=(msg,type="success")=>setToast({msg,type});
@@ -545,6 +1034,10 @@ function App(){
     setViewer({ email, name:mine[0]?.name||email, designation:mine[0]?.designation||"",
       clientName, levels:mine.map(m=>m.access_level) });
     setReports(reps||[]);
+    if(clientName){
+      const {data:cr}=await sb.from("common_observations").select("*").eq("client_name",clientName);
+      setCommonRows(cr||[]);
+    }
     setAuthState("ready");
   };
 
@@ -608,12 +1101,9 @@ function App(){
               <div style={{fontSize:13,color:P.muted}}>Reports appear here once they are published by NCLS & Associates.</div>
             </div>
           ):(<>
-          {new Set(reports.map(r=>r.unit_name)).size>1 && (
-            <ConsolidatedView clientName={viewer.clientName} reports={reports} onSelectUnit={r=>setOpenId(r.id)}/>
-          )}
-          {new Set(reports.map(r=>r.unit_name)).size>1 && (
-            <div style={{fontSize:15,fontWeight:800,color:P.slate,marginBottom:14}}>Individual Unit Reports</div>
-          )}
+          {new Set(reports.map(r=>r.unit_name)).size>1 ? (
+            <ConsolidatedView clientName={viewer.clientName} reports={reports} commonRows={commonRows} onSelectUnit={r=>setOpenId(r.id)}/>
+          ) : (
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:16}}>
               {reports.map(r=>{
                 const risk=r.report_json?.audit_summary?.observation_count_by_risk||{};
@@ -638,6 +1128,7 @@ function App(){
                       <span style={{fontSize:12,color:P.blue,fontWeight:700}}>View →</span></div>
                   </div>);})}
             </div>
+          )}
           </>)}
         </div>)}
 

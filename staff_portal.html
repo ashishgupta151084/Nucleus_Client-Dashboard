@@ -7,6 +7,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -90,6 +91,16 @@ Here's the JSON shape I'm looking for:
     ],
     "executive_summary": "Conclusion / executive summary text, else empty string"
   },
+  "previous_audit_noncompliance": [
+    {
+      "area": "Inventory Management",
+      "title": "Undefined Stock Levels and Delays in Material Receipt",
+      "action_plan": "We will maintain minimum-maximum stock level and lead time.",
+      "target_date": "2025-05-31",
+      "pending_since_days": 249,
+      "responsible": "Mr. Neelkanth"
+    }
+  ],
   "limitations": [
     {
       "area": "Sales",
@@ -124,6 +135,22 @@ Here's the JSON shape I'm looking for:
     }
   ]
 }
+
+## Previous Audit Non-Compliance — how to fill it
+
+Most reports have a section titled **"Previous Audit Non-Compliance"** (sometimes "Prior Year
+Open Observations"). It lists findings from an earlier audit that are still open, usually in a
+table with columns like Process / Observation Title / Action Plan / Target Date / Pending Since
+(No. of days).
+
+Please capture **every row** of that table into \`previous_audit_noncompliance\`, one entry per row:
+- \`area\` — the Process column
+- \`title\` — the Observation Title column, as written
+- \`action_plan\`, \`target_date\`, \`pending_since_days\`, \`responsible\` — from their columns; use
+  \`""\` or \`0\` where a column is blank or absent
+- If the report has no such section, use an empty array \`[]\`
+
+This is separate from the \`is_repeated\` flag on individual observations — a report can have both.
 
 ## Limitations section — how to fill it
 
@@ -242,6 +269,49 @@ function validateJSON(json) {
     json.audit_summary.area_wise_summary.forEach(row=>{
       const sum=(row.critical||0)+(row.high||0)+(row.medium||0)+(row.low||0);
       if (sum!==row.total) errors.push(`Area "${row.area}": risk counts sum to ${sum} but total says ${row.total}`);
+    });
+  }
+
+  // ── Tally the ACTUAL observations against what the executive summary claims ──
+  if (Array.isArray(json.areas)) {
+    const counted = { critical:0, high:0, medium:0, low:0 };
+    const perArea = {};
+    json.areas.forEach(a=>{
+      const nm = a.area_name || "(unnamed area)";
+      perArea[nm] = perArea[nm] || { critical:0, high:0, medium:0, low:0, total:0 };
+      (a.observations||[]).forEach(o=>{
+        const k = String(o.risk_level||"").toLowerCase();
+        if (counted[k]!==undefined) { counted[k]++; perArea[nm][k]++; }
+        perArea[nm].total++;
+      });
+    });
+    const countedTotal = counted.critical+counted.high+counted.medium+counted.low;
+
+    const claimed = json.audit_summary?.observation_count_by_risk;
+    if (claimed) {
+      ["critical","high","medium","low"].forEach(k=>{
+        if ((claimed[k]||0) !== counted[k])
+          errors.push(`Executive summary says ${claimed[k]||0} ${k} observation(s), but ${counted[k]} were actually extracted — some observations are missing or mis-tagged`);
+      });
+      const claimedTotal = (claimed.critical||0)+(claimed.high||0)+(claimed.medium||0)+(claimed.low||0);
+      if (claimedTotal !== countedTotal)
+        errors.push(`Executive summary totals ${claimedTotal} observations, but ${countedTotal} were extracted — re-run the extraction for the missing ones`);
+    }
+
+    (json.audit_summary?.area_wise_summary||[]).forEach(row=>{
+      const got = perArea[row.area];
+      if (!got) { errors.push(`Area "${row.area}" is in the executive summary but has no observations extracted`); return; }
+      if (got.total !== (row.total||0))
+        errors.push(`Area "${row.area}": summary says ${row.total} observation(s), but ${got.total} were extracted`);
+      ["critical","high","medium","low"].forEach(k=>{
+        if ((row[k]||0) !== got[k])
+          errors.push(`Area "${row.area}" — ${k}: summary says ${row[k]||0}, extracted ${got[k]}`);
+      });
+    });
+
+    Object.keys(perArea).forEach(nm=>{
+      const inSummary = (json.audit_summary?.area_wise_summary||[]).some(r=>r.area===nm);
+      if (!inSummary) warnings.push(`Area "${nm}" has observations but is not listed in the executive summary table`);
     });
   }
   if (Array.isArray(json.limitations)) {
@@ -744,6 +814,214 @@ function MyUploads({ reports }) {
 }
 
 // ── APP ───────────────────────────────────────────────────────────────────
+// ── Common Observations: download all observations as Excel, mark, re-upload ─
+function CommonObsSection({ user, clients, units, showToast }) {
+  const [client,setClient]=useState("");
+  const [selUnits,setSelUnits]=useState([]);
+  const [busy,setBusy]=useState(false);
+  const [existing,setExisting]=useState([]);
+  const [upFile,setUpFile]=useState(null);
+
+  const clientUnits = units.filter(u=>u.client_name===client);
+
+  useEffect(()=>{
+    if(!client){ setExisting([]); return; }
+    sb.from("common_observations").select("*").eq("client_name",client)
+      .then(({data})=>setExisting(data||[]));
+  },[client]);
+
+  const toggleUnit = n => setSelUnits(s=>s.includes(n)?s.filter(x=>x!==n):[...s,n]);
+
+  const downloadExcel = async () => {
+    if(!client){ showToast("Select a client first","error"); return; }
+    setBusy(true);
+    try{
+      let q = sb.from("reports").select("*").eq("client_name",client).in("status",["Live","Draft"]);
+      const {data:reps,error} = await q;
+      if(error) throw new Error(error.message);
+      const chosen = selUnits.length ? (reps||[]).filter(r=>selUnits.includes(r.unit_name)) : (reps||[]);
+      if(!chosen.length){ showToast("No reports found for that selection","error"); setBusy(false); return; }
+
+      const rows=[];
+      chosen.forEach(r=>{
+        const j=r.report_json||{};
+        (j.areas||[]).forEach(a=>{
+          (a.observations||[]).forEach(o=>{
+            rows.push({
+              "Common Group": "",
+              "Unit": r.unit_name,
+              "FY": r.fy,
+              "Area": a.area_name||"",
+              "Observation Title": o.title||"",
+              "Risk Level": o.risk_level||"",
+              "Repeated": o.is_repeated ? "Yes" : "No",
+              "Root Cause": o.root_cause||"",
+              "Financial Impact": o.financial_impact||"",
+              "Responsible": o.responsible||"",
+              "Target Date": o.target_date||"",
+              "Report ID": r.id,
+            });
+          });
+        });
+      });
+      if(!rows.length){ showToast("Those reports contain no observations","error"); setBusy(false); return; }
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws["!cols"] = [{wch:26},{wch:18},{wch:10},{wch:22},{wch:52},{wch:12},{wch:10},{wch:24},{wch:20},{wch:20},{wch:14},{wch:10}];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Observations");
+
+      const guide = XLSX.utils.aoa_to_sheet([
+        ["How to mark Common Observations"],
+        [""],
+        ["1. Look through the Observations sheet — it lists every observation from every unit selected."],
+        ["2. Where the same underlying issue appears in two or more units, type the SAME label into the"],
+        ["   'Common Group' column for each of those rows. Use a short descriptive name, e.g."],
+        ["   'Min-max stock levels not defined' or 'PPE non-compliance'."],
+        ["3. Leave 'Common Group' blank for observations that are not common across units."],
+        ["4. Do not add, delete or reorder columns. Do not rename the sheet."],
+        ["5. Save the file and upload it back in the Staff Portal."],
+        [""],
+        ["Only rows with a Common Group label, appearing in 2 or more units, will show on the"],
+        ["client dashboard's Common Observations tab. Uploading replaces the previous list for this client."],
+      ]);
+      guide["!cols"]=[{wch:100}];
+      XLSX.utils.book_append_sheet(wb, guide, "Instructions");
+
+      const stamp = new Date().toISOString().slice(0,10);
+      XLSX.writeFile(wb, `${client.replace(/[^a-z0-9]+/gi,"_")}_Observations_${stamp}.xlsx`);
+      showToast(`Downloaded ${rows.length} observations from ${chosen.length} report(s)`);
+    }catch(e){ showToast("Download failed: "+e.message,"error"); }
+    setBusy(false);
+  };
+
+  const uploadMarked = async () => {
+    if(!client){ showToast("Select a client first","error"); return; }
+    if(!upFile){ showToast("Choose the marked Excel file","error"); return; }
+    setBusy(true);
+    try{
+      const buf = await upFile.arrayBuffer();
+      const wb = XLSX.read(buf,{type:"array"});
+      const sheet = wb.Sheets["Observations"] || wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet);
+      const marked = rows.filter(r=>String(r["Common Group"]||"").trim());
+      if(!marked.length){ showToast("No rows have a Common Group label","error"); setBusy(false); return; }
+
+      // keep only groups spanning 2+ units
+      const byGroup = {};
+      marked.forEach(r=>{
+        const g = String(r["Common Group"]).trim();
+        (byGroup[g]=byGroup[g]||[]).push(r);
+      });
+      const keep=[]; const dropped=[];
+      Object.entries(byGroup).forEach(([g,rs])=>{
+        const unitCount = new Set(rs.map(r=>r["Unit"])).size;
+        if(unitCount>1) keep.push(...rs.map(r=>({...r,_g:g}))); else dropped.push(g);
+      });
+      if(!keep.length){
+        showToast("No group appears in 2 or more units — nothing to save","error"); setBusy(false); return;
+      }
+
+      await sb.from("common_observations").delete().eq("client_name",client);
+      const payload = keep.map(r=>({
+        client_name: client,
+        group_label: r._g,
+        area: r["Area"]||null,
+        unit_name: r["Unit"]||"",
+        report_id: r["Report ID"]||null,
+        title: r["Observation Title"]||null,
+        risk_level: r["Risk Level"]||null,
+        uploaded_by: user.email,
+      }));
+      const {error} = await sb.from("common_observations").insert(payload);
+      if(error) throw new Error(error.message);
+
+      const groups = new Set(keep.map(r=>r._g)).size;
+      setExisting(payload);
+      setUpFile(null);
+      showToast(`Saved ${groups} common observation group${groups===1?"":"s"} (${keep.length} rows)` +
+        (dropped.length?` · ${dropped.length} group(s) skipped — only in one unit`:""));
+    }catch(e){ showToast("Upload failed: "+e.message,"error"); }
+    setBusy(false);
+  };
+
+  const groupSummary = Object.entries(existing.reduce((a,r)=>{
+    (a[r.group_label]=a[r.group_label]||new Set()).add(r.unit_name); return a; },{}))
+    .map(([g,s])=>({group:g,units:[...s]})).sort((a,b)=>b.units.length-a.units.length);
+
+  return (
+    <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"24px",marginTop:24}}>
+      <div style={{fontSize:16,fontWeight:800,color:P.slate,marginBottom:4}}>Common Observations</div>
+      <div style={{fontSize:13,color:P.muted,marginBottom:20}}>
+        Download every observation for a client, mark which ones are the same issue across units, then upload it back.
+        Only what you mark here appears on the client's Common Observations tab.
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr",gap:14,marginBottom:18}}>
+        <Sel label="CLIENT" value={client} onChange={v=>{setClient(v);setSelUnits([]);}}
+          options={[...new Set(clients.map(c=>c.client_name))]} placeholder="Select client..." required/>
+        {client && (
+          <div>
+            <div style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:7}}>
+              UNITS <span style={{fontWeight:500,textTransform:"none",letterSpacing:0}}>· leave all unticked to include every unit</span>
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {clientUnits.map(u=>(
+                <button key={u.id} onClick={()=>toggleUnit(u.unit_name)} style={{
+                  background:selUnits.includes(u.unit_name)?P.blue:"#F1F5F9",
+                  color:selUnits.includes(u.unit_name)?"#fff":P.mid, border:"none", borderRadius:7,
+                  padding:"6px 14px", fontSize:12, fontWeight:600, cursor:"pointer"}}>{u.unit_name}</button>
+              ))}
+              {!clientUnits.length && <span style={{fontSize:12,color:P.muted}}>No units set up for this client.</span>}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:22}}>
+        <Btn onClick={downloadExcel} disabled={busy||!client}>
+          {busy?"Working...":"⬇ Download Observations Excel"}
+        </Btn>
+      </div>
+
+      <div style={{borderTop:`1px solid ${P.border}`,paddingTop:20}}>
+        <div style={{fontSize:13,fontWeight:700,color:P.slate,marginBottom:10}}>Upload the marked file</div>
+        <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+          <label style={{background:"#F1F5F9",border:`1.5px dashed ${P.border}`,borderRadius:9,
+            padding:"10px 18px",fontSize:13,fontWeight:600,color:P.mid,cursor:"pointer"}}>
+            {upFile ? upFile.name : "Choose .xlsx file"}
+            <input type="file" accept=".xlsx,.xls" style={{display:"none"}}
+              onChange={e=>setUpFile(e.target.files?.[0]||null)}/>
+          </label>
+          <Btn onClick={uploadMarked} disabled={busy||!upFile||!client} color="green">
+            {busy?"Saving...":"Save Common Observations"}
+          </Btn>
+        </div>
+        <div style={{fontSize:11,color:P.muted,marginTop:8}}>
+          Uploading replaces the existing list for this client. Groups appearing in only one unit are skipped.
+        </div>
+      </div>
+
+      {client && (
+        <div style={{marginTop:22,borderTop:`1px solid ${P.border}`,paddingTop:18}}>
+          <div style={{fontSize:13,fontWeight:700,color:P.slate,marginBottom:10}}>
+            Currently saved for {client} — {groupSummary.length} group{groupSummary.length===1?"":"s"}
+          </div>
+          {groupSummary.length===0 ? (
+            <div style={{fontSize:12,color:P.muted}}>Nothing saved yet. The client's Common Observations tab will be empty.</div>
+          ) : groupSummary.map(g=>(
+            <div key={g.group} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"9px 12px",background:"#F8FAFC",borderRadius:8,marginBottom:6,gap:12}}>
+              <span style={{fontSize:13,color:P.slate,fontWeight:600}}>{g.group}</span>
+              <span style={{fontSize:11,color:P.muted,whiteSpace:"nowrap"}}>{g.units.join(", ")}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [authState,setAuthState]=useState("loading");
   const [user,setUser]=useState(null);
@@ -831,6 +1109,7 @@ function App() {
         </div>
         <UploadForm user={user} clients={clients} assignments={assignments} units={units}
           onUploaded={()=>loadData(user)} showToast={showToast}/>
+        <CommonObsSection user={user} clients={clients} units={units} showToast={showToast}/>
         <MyUploads reports={myReports}/>
       </div>
       {toast&&<Toast msg={toast.msg} type={toast.type} onDone={()=>setToast(null)}/>}
