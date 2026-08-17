@@ -27,9 +27,105 @@ const sb = supabase.createClient(SB_URL, SB_KEY);
 
 const P={ink:"#0D1117",slate:"#1E293B",mid:"#475569",muted:"#94A3B8",border:"#E2E8F0",bg:"#F1F5F9",white:"#FFFFFF",
   blue:"#1D4ED8",blueLt:"#EFF6FF",blueBd:"#BFDBFE",green:"#16A34A",greenLt:"#F0FDF4",greenBd:"#BBF7D0",
-  red:"#DC2626",redLt:"#FEF2F2",redBd:"#FECACA",amber:"#D97706",amberLt:"#FFFBEB",amberBd:"#FDE68A"};
+  red:"#DC2626",redLt:"#FEF2F2",redBd:"#FECACA",amber:"#D97706",amberLt:"#FFFBEB",amberBd:"#FDE68A",
+  purple:"#7C3AED",purpleLt:"#F5F3FF",purpleBd:"#DDD6FE"};
 const RISK={Critical:"#DC2626",High:"#1E3A8A",Medium:"#93C5FD",Low:"#16A34A"};
 const RISK_ORDER = ["Critical","High","Medium","Low"];
+function readableError(err){
+  const m=(err?.message||String(err)||"").toLowerCase();
+  if(m.includes("rate limit")||m.includes("too many")) return "Too many attempts. Please wait a minute and try again.";
+  if(m.includes("invalid")||m.includes("expired")) return "That code is not valid or has expired. Request a new one.";
+  if(m.includes("not authorized")||m.includes("not allowed")) return "This email does not have access. Contact NCLS & Associates.";
+  if(m.includes("network")||m.includes("fetch")) return "Network problem. Check your connection and try again.";
+  return err?.message || "Something went wrong. Please try again.";
+}
+
+function LoginScreen() {
+  const [email,setEmail]=useState(""); const [code,setCode]=useState("");
+  const [step,setStep]=useState("email"); const [busy,setBusy]=useState(false); const [error,setError]=useState("");
+  const send=async()=>{ setError("");
+    const em=email.trim().toLowerCase();
+    if(!em.includes("@")){setError("Enter a valid email address.");return;}
+    setBusy(true);
+    const {error:err}=await sb.auth.signInWithOtp({email:em,options:{shouldCreateUser:true}});
+    setBusy(false); if(err){setError(readableError(err));return;} setStep("code");
+  };
+  const verify=async()=>{ setError("");
+    if(code.trim().length<6){setError("Enter the code from your email.");return;}
+    setBusy(true);
+    const {error:err}=await sb.auth.verifyOtp({email:email.trim().toLowerCase(),token:code.trim(),type:"email"});
+    setBusy(false); if(err){setError(readableError(err));return;}
+  };
+  return (
+    <div style={{minHeight:"100vh",background:P.ink,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{width:"100%",maxWidth:420}}>
+        <div style={{textAlign:"center",marginBottom:36}}>
+          <div style={{display:"inline-flex",alignItems:"center",gap:10,marginBottom:16}}>
+            <div style={{width:40,height:40,background:P.blue,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,fontWeight:900,color:"#fff"}}>N</div>
+            <div style={{textAlign:"left"}}>
+              <div style={{fontWeight:800,color:"#F8FAFC",fontSize:16}}>NCLS & Associates</div>
+              <div style={{fontSize:11,color:P.muted}}>Chartered Accountants</div>
+            </div>
+          </div>
+          <div style={{fontSize:22,fontWeight:800,color:"#F8FAFC",marginBottom:6}}>Internal Audit Dashboard</div>
+          <div style={{fontSize:13,color:P.muted}}>Sign in with your email — a code will be sent to you</div>
+        </div>
+        <div style={{background:"#1C2333",borderRadius:16,padding:"32px 28px",border:"1px solid #2D3748"}}>
+          {step==="email"?(
+            <>
+              <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>EMAIL ADDRESS</label>
+              <input value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder="you@company.com" autoFocus
+                style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:14,outline:"none",marginBottom:8}}/>
+              {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
+              <button onClick={send} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginTop:6,cursor:"pointer"}}>
+                {busy?"Sending code...":"Send One-Time Code →"}
+              </button>
+            </>
+          ):(
+            <>
+              <div style={{fontSize:13,color:P.muted,marginBottom:18}}>Code sent to <strong style={{color:"#93C5FD"}}>{email}</strong>. Check your inbox and spam.</div>
+              <label style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,display:"block",marginBottom:6}}>SIGN-IN CODE</label>
+              <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,8))} onKeyDown={e=>e.key==="Enter"&&verify()}
+                placeholder="Enter code" autoFocus maxLength={8}
+                style={{width:"100%",background:"#0D1117",border:`1px solid ${error?"#EF4444":"#2D3748"}`,borderRadius:8,padding:"11px 14px",color:"#F8FAFC",fontSize:22,fontWeight:800,letterSpacing:6,textAlign:"center",outline:"none",marginBottom:8}}/>
+              {error&&<div style={{fontSize:12,color:"#EF4444",marginBottom:8}}>{error}</div>}
+              <button onClick={verify} disabled={busy} style={{width:"100%",background:busy?"#374151":P.blue,color:"#fff",border:"none",borderRadius:8,padding:"12px 0",fontWeight:700,fontSize:14,marginBottom:12,cursor:"pointer"}}>
+                {busy?"Verifying...":"Verify & Sign In →"}
+              </button>
+              <div style={{textAlign:"center",fontSize:12}}>
+                <span onClick={()=>{setStep("email");setCode("");setError("");}} style={{color:"#93C5FD",cursor:"pointer"}}>← Change email / resend</span>
+              </div>
+            </>
+          )}
+        </div>
+        <div style={{textAlign:"center",marginTop:18,fontSize:11,color:"#374151"}}>Access is limited to email addresses authorised by NCLS &amp; Associates.</div>
+      </div>
+    </div>
+  );
+}
+
+const Btn = ({ children, onClick, color="blue", size="md", disabled, outline, full }) => {
+  const map = { blue:{bg:P.blue,t:"#fff",b:P.blue}, gray:{bg:"#F1F5F9",t:P.slate,b:P.border},
+    red:{bg:P.red,t:"#fff",b:P.red}, green:{bg:P.green,t:"#fff",b:P.green},
+    amber:{bg:P.amber,t:"#fff",b:P.amber}, purple:{bg:P.purple,t:"#fff",b:P.purple} };
+  const c = map[color] || map.blue;
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      background: outline ? "transparent" : (disabled ? "#CBD5E1" : c.bg),
+      color: outline ? c.bg : c.t,
+      border: `1.5px solid ${disabled ? "#CBD5E1" : c.b}`,
+      borderRadius: 8,
+      padding: size==="sm" ? "6px 12px" : "10px 18px",
+      fontSize: size==="sm" ? 12 : 13,
+      fontWeight: 700,
+      cursor: disabled ? "not-allowed" : "pointer",
+      width: full ? "100%" : "auto",
+      opacity: disabled ? 0.7 : 1,
+      whiteSpace: "nowrap",
+    }}>{children}</button>
+  );
+};
+
 const ROOT_CAUSE_COLORS = [P.blue, P.purple, P.amber, "#0D9488", P.red, P.muted];
 
 function RiskDonut({ risk, size=220 }) {
