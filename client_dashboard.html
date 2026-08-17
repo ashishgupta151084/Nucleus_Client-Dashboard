@@ -1020,6 +1020,7 @@ function App(){
   const [viewer,setViewer]=useState(null);
   const [reports,setReports]=useState([]);
   const [commonRows,setCommonRows]=useState([]);
+  const [viewMode,setViewMode]=useState("consolidated");  // "consolidated" | "individual"
   const [openId,setOpenId]=useState(null);
   const [toast,setToast]=useState(null);
   const showToast=(msg,type="success")=>setToast({msg,type});
@@ -1101,7 +1102,18 @@ function App(){
               <div style={{fontSize:13,color:P.muted}}>Reports appear here once they are published by NCLS & Associates.</div>
             </div>
           ):(<>
-          {new Set(reports.map(r=>r.unit_name)).size>1 ? (
+          {new Set(reports.map(r=>r.unit_name)).size>1 && (
+            <div style={{display:"flex",gap:8,marginBottom:20,background:P.white,border:`1px solid ${P.border}`,
+              borderRadius:10,padding:5,width:"fit-content"}}>
+              {[["consolidated","Consolidated View"],["individual","Individual Reports"]].map(([id,label])=>(
+                <button key={id} onClick={()=>setViewMode(id)} style={{
+                  background:viewMode===id?P.blue:"transparent", color:viewMode===id?"#fff":P.mid,
+                  border:"none", borderRadius:7, padding:"8px 18px", fontSize:13,
+                  fontWeight:viewMode===id?700:500, cursor:"pointer" }}>{label}</button>
+              ))}
+            </div>
+          )}
+          {new Set(reports.map(r=>r.unit_name)).size>1 && viewMode==="consolidated" ? (
             <ConsolidatedView clientName={viewer.clientName} reports={reports} commonRows={commonRows} onSelectUnit={r=>setOpenId(r.id)}/>
           ) : (
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:16}}>
@@ -1123,9 +1135,15 @@ function App(){
                           <div style={{fontSize:18,fontWeight:900,color:c}}>{v}</div>
                           <div style={{fontSize:9,fontWeight:700,color:c}}>{l.toUpperCase()}</div></div>))}
                     </div>
+                    {r.report_json?.audit_summary?.executive_summary && (
+                      <div style={{fontSize:12,color:P.mid,lineHeight:1.55,marginBottom:12,
+                        display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical",overflow:"hidden"}}>
+                        {r.report_json.audit_summary.executive_summary}
+                      </div>
+                    )}
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:12,borderTop:`1px solid ${P.border}`}}>
                       <span style={{fontSize:12,color:P.muted}}>{total} observations</span>
-                      <span style={{fontSize:12,color:P.blue,fontWeight:700}}>View →</span></div>
+                      <span style={{fontSize:12,color:P.blue,fontWeight:700}}>View full report →</span></div>
                   </div>);})}
             </div>
           )}

@@ -1602,6 +1602,11 @@ function ReportsSection({ user, reports, reload, showToast }) {
   const [rejecting, setRejecting] = useState(null);
   const [reason, setReason] = useState("");
   const [previewId, setPreviewId] = useState(null);
+  const [deleteItem, setDeleteItem] = useState(null);
+  const [filterClient, setFilterClient] = useState("");
+  const [filterUnit, setFilterUnit] = useState("");
+  const [filterFY, setFilterFY] = useState("");
+  const [search, setSearch] = useState("");
 
   const canApprove = !!user.perms?.approve_reports;
   const mine = r => !user.clients?.length || user.clients.includes(r.ClientName);
@@ -1652,7 +1657,35 @@ function ReportsSection({ user, reports, reload, showToast }) {
     showToast("Email removed");
   };
 
-  const filtered = filterStatus ? reports.filter(r=>r.Status===filterStatus) : reports;
+  const doDelete = async r => {
+    try {
+      for (const path of [r.ReportFile, r.AnnexureFile].filter(Boolean)) {
+        await sb.storage.from("reports").remove([path]);
+      }
+      await sb.from("client_access").delete().eq("report_id", r.id);
+      await dbDelete("reports", r.id);
+      await logAction("Deleted report", user.email, `${r.ClientName} — ${r.UnitName} FY${r.FY}`, "Reports");
+      showToast("Report deleted"); setDeleteItem(null); reload();
+    } catch(e) { showToast(e.message,"error"); }
+  };
+
+  const clientList = [...new Set(reports.map(r=>r.ClientName))].sort();
+  const unitList = [...new Set(reports.filter(r=>!filterClient||r.ClientName===filterClient).map(r=>r.UnitName))].sort();
+  const fyList = [...new Set(reports.map(r=>r.FY))].filter(Boolean).sort();
+
+  const filtered = reports.filter(r=>{
+    if (filterStatus && r.Status!==filterStatus) return false;
+    if (filterClient && r.ClientName!==filterClient) return false;
+    if (filterUnit   && r.UnitName!==filterUnit) return false;
+    if (filterFY     && r.FY!==filterFY) return false;
+    if (search) {
+      const hay = `${r.ClientName} ${r.UnitName} ${r.FY} ${r.UploadedBy} ${r.UDIN||""} ${r.Period||""}`.toLowerCase();
+      if (!hay.includes(search.toLowerCase())) return false;
+    }
+    return true;
+  });
+  const anyFilter = filterStatus||filterClient||filterUnit||filterFY||search;
+  const clearFilters = () => { setFilterStatus(""); setFilterClient(""); setFilterUnit(""); setFilterFY(""); setSearch(""); };
 
   return (
     <Card title="Reports" subtitle={`${reports.length} reports — uploaded via the staff portal`}>
@@ -1672,17 +1705,28 @@ function ReportsSection({ user, reports, reload, showToast }) {
         </div>
       )}
 
-      <div style={{marginBottom:14,maxWidth:220}}>
-        <Sel value={filterStatus} onChange={setFilterStatus} options={["Draft","Live","Rejected","Archived"]} placeholder="Filter by status..."/>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10,marginBottom:8}}>
+        <Sel value={filterStatus} onChange={setFilterStatus} options={["Draft","Live","Rejected","Archived"]} placeholder="All statuses"/>
+        <Sel value={filterClient} onChange={v=>{setFilterClient(v);setFilterUnit("");}} options={clientList} placeholder="All clients"/>
+        <Sel value={filterUnit} onChange={setFilterUnit} options={unitList} placeholder="All units"/>
+        <Sel value={filterFY} onChange={setFilterFY} options={fyList} placeholder="All financial years"/>
+        <Inp value={search} onChange={setSearch} placeholder="Search client, unit, UDIN, uploader..."/>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14,minHeight:24}}>
+        <span style={{fontSize:12,color:P.muted}}>
+          Showing {filtered.length} of {reports.length} report{reports.length===1?"":"s"}
+        </span>
+        {anyFilter && <Btn size="sm" color="gray" onClick={clearFilters}>Clear filters</Btn>}
       </div>
 
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-        <thead><tr><TH>Client / Unit</TH><TH>FY</TH><TH>Status</TH><TH>Uploaded By</TH><TH>Files</TH><TH>Actions</TH></tr></thead>
+        <thead><tr><TH center>S.No</TH><TH>Client / Unit</TH><TH>FY</TH><TH>Status</TH><TH>Uploaded By</TH><TH>Files</TH><TH>Actions</TH></tr></thead>
         <tbody>
           {filtered.map((r,i)=>{
             const awaiting = r.Status==="Draft" && mine(r);
             return (
             <tr key={r.id} style={{borderBottom:`1px solid ${P.border}`,background:awaiting?"#FFFDF5":(i%2===0?P.white:"#FAFAFA")}}>
+              <TD center muted small>{i+1}</TD>
               <td style={{padding:"10px 12px"}}>
                 <div style={{fontWeight:700,color:P.slate,display:"flex",alignItems:"center",gap:6}}>
                   {r.ClientName}
@@ -1709,10 +1753,12 @@ function ReportsSection({ user, reports, reload, showToast }) {
                 {!canApprove && r.Status==="Draft" && <span style={{fontSize:11,color:P.muted}}>Awaiting approver</span>}
                 {r.Status!=="Archived" && <Btn size="sm" color="gray" onClick={()=>setStatus(r,"Archived")}>Archive</Btn>}
                 <Btn size="sm" color="purple" outline onClick={()=>setSelected(r)}>Access</Btn>
+                <Btn size="sm" color="red" outline onClick={()=>setDeleteItem(r)}>Delete</Btn>
               </div></td>
             </tr>);
           })}
-          {!filtered.length&&<tr><td colSpan={6} style={{padding:"24px 12px",color:P.muted,textAlign:"center"}}>No reports yet. Reports appear here once staff upload them.</td></tr>}
+          {!filtered.length&&<tr><td colSpan={7} style={{padding:"24px 12px",color:P.muted,textAlign:"center"}}>
+            {anyFilter ? "No reports match these filters." : "No reports yet. Reports appear here once staff upload them."}</td></tr>}
         </tbody>
       </table>
 
@@ -1744,6 +1790,14 @@ function ReportsSection({ user, reports, reload, showToast }) {
             )) : <div style={{fontSize:12,color:P.muted}}>No additional emails. Access inherited from client settings.</div>}
           </div>
         </Modal>
+      )}
+
+      {deleteItem && (
+        <ConfirmModal title="Delete Report" onClose={()=>setDeleteItem(null)}
+          message={<>Permanently delete the <strong>{deleteItem.UnitName}</strong> report for <strong>{deleteItem.ClientName}</strong> (FY {deleteItem.FY})?
+            <br/><br/>This removes the report data, its uploaded files, and any report-specific access granted to it. It cannot be undone —
+            use <strong>Archive</strong> instead if you only want to hide it from the client.</>}
+          onConfirm={()=>doDelete(deleteItem)}/>
       )}
 
       {previewId && (
