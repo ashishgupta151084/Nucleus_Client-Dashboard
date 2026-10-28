@@ -26,198 +26,9 @@ const SB_KEY = "sb_publishable_w50vP_IpYA4wHKQZ2A7mNg_mKtL-Wzx";
 const sb = supabase.createClient(SB_URL, SB_KEY);
 const SUPER_ADMIN = "ashishgupta151084@gmail.com";
 
-const PROMPT_TEXT = `Hi Claude — I work at NCLS & Associates, a Chartered Accountancy firm, and I've attached one of
-our internal audit reports (it may be a PDF or a slide deck export, sometimes scanned or
-image-heavy). Could you help me convert it into a JSON file? I need this for a dashboard system
-our firm uses, so the structure below has to be followed closely.
+// The staff prompt template was removed: reports are now converted locally
+// by lib/report-parser.js and never pasted into an AI tool.
 
-A few things that would really help me:
-
-- **Please reply with just the JSON object** — no text before or after it, and no markdown code
-  fences. I'll be copying your reply straight into a \`.json\` file, so anything extra means I have
-  to go back and edit it out by hand.
-- **Please don't spend time visually analysing or describing the photos** in the report — things
-  like site photos, stock boards, or screenshots of physical documents. The written observation
-  text next to each photo already explains what it shows, so the photo itself isn't needed for
-  the JSON. Skipping over these should also make this faster. The one exception is when a table's
-  actual figures only exist as an image with no separate text version — in that case a quick read
-  of just that table is fine, but everything else (illustrative photos, site pictures, signage,
-  stacked boxes, etc.) can be skipped entirely.
-- **If parts of the report are hard to read, please don't skip them or stop** — just do your best
-  with what you can make out, and note anything you're unsure about in a \`clarifications_needed\`
-  list at the end. A partial JSON with a few open questions is far more useful to me than being
-  told the file can't be processed — these reports are always genuine, readable audit reports,
-  just sometimes as image-heavy slide decks.
-- **Please don't invent or guess at values.** Everything should come from the report. If a field
-  genuinely isn't in the report, \`""\` for text or \`0\` for numbers is fine.
-- **Please don't shorten or summarise the observation text or action plans** — copy them close to
-  as written, keeping the specific numbers, sample sizes, percentages and names intact.
-- **Please make sure every observation is captured.** If the executive summary says there are 25
-  observations, I'd like to see all 25 in the JSON — it's worth double-checking the count before
-  you finish.
-
-A few structural things to keep consistent:
-
-- \`risk_level\` should be exactly one of: \`Critical\`, \`High\`, \`Medium\`, \`Low\`.
-- For every area, \`critical + high + medium + low\` should add up to that area's \`total\`, and
-  \`total\` should match the number of observations listed for that area.
-- Dates in \`YYYY-MM-DD\` where possible. If the report just says "Immediate" or "Not Provided",
-  \`""\` is fine — a note in \`clarifications_needed\` is helpful there.
-- \`area_name\` under \`areas\` should match \`area\` under \`area_wise_summary\` exactly, using the
-  area names from the executive summary table.
-- Cover slides, section dividers, tables of contents and "Thank You" slides can be skipped. For
-  data tables or images referenced inside an observation, the observation's own narrative text
-  is what matters — the raw table rows can be left out.
-
-## Required structure
-
-Here's the JSON shape I'm looking for:
-{
-  "report_metadata": {
-    "client_name": "Full legal name of the client",
-    "unit_name": "Unit / location / plant covered",
-    "fy": "2025-26",
-    "audit_period_from": "2025-10-01",
-    "audit_period_to": "2025-12-31",
-    "auditors": ["Name 1", "Name 2"],
-    "udin": "UDIN as printed, else empty string",
-    "overall_rating": "Overall rating/conclusion as stated, else empty string",
-    "report_date": "YYYY-MM-DD or empty string"
-  },
-  "audit_summary": {
-    "observation_count_by_risk": { "critical": 0, "high": 0, "medium": 0, "low": 0 },
-    "area_wise_summary": [
-      { "area": "Inventory Management", "total": 13, "critical": 2, "high": 3, "medium": 5, "low": 3 }
-    ],
-    "executive_summary": "Conclusion / executive summary text, else empty string"
-  },
-  "previous_audit_noncompliance": [
-    {
-      "area": "Inventory Management",
-      "title": "Undefined Stock Levels and Delays in Material Receipt",
-      "action_plan": "We will maintain minimum-maximum stock level and lead time.",
-      "target_date": "2025-05-31",
-      "pending_since_days": 249,
-      "responsible": "Mr. Neelkanth"
-    }
-  ],
-  "limitations": [
-    {
-      "area": "Sales",
-      "items": ["Part Wise Daily Dispatch Report", "Set Wise Sales Rate", "RMC Report"]
-    }
-  ],
-  "areas": [
-    {
-      "area_name": "Inventory Management",
-      "observations": [
-        {
-          "title": "Observation heading as given in the report",
-          "risk_level": "Critical",
-          "observation": "Full observation text.",
-          "action_plan": "Management action plan as written. Include any Auditor's Remarks.",
-          "responsible": "Responsible person as named, else empty string",
-          "target_date": "YYYY-MM-DD or empty string",
-          "annexure_ref": "Table/Image/Annexure reference if cited, else empty string",
-          "financial_impact": "Amount as stated e.g. 'INR 1.13 lakhs', else empty string",
-          "is_repeated": false,
-          "pending_since_days": 0,
-          "root_cause": "Process Design Deficiency"
-        }
-      ]
-    }
-  ],
-  "clarifications_needed": [
-    {
-      "field": "report_metadata.overall_rating",
-      "question": "State the conflict or uncertainty as a question for the auditor.",
-      "extracted_value": "The value you used"
-    }
-  ]
-}
-
-## Previous Audit Non-Compliance — how to fill it
-
-Most reports have a section titled **"Previous Audit Non-Compliance"** (sometimes "Prior Year
-Open Observations"). It lists findings from an earlier audit that are still open, usually in a
-table with columns like Process / Observation Title / Action Plan / Target Date / Pending Since
-(No. of days).
-
-Please capture **every row** of that table into \`previous_audit_noncompliance\`, one entry per row:
-- \`area\` — the Process column
-- \`title\` — the Observation Title column, as written
-- \`action_plan\`, \`target_date\`, \`pending_since_days\`, \`responsible\` — from their columns; use
-  \`""\` or \`0\` where a column is blank or absent
-- If the report has no such section, use an empty array \`[]\`
-
-This is separate from the \`is_repeated\` flag on individual observations — a report can have both.
-
-## Limitations section — how to fill it
-
-Reports usually have a "Limitation of Scope" slide with a table of Area → data not made
-available. Capture this exactly:
-- One entry per area listed in that table.
-- \`items\` is the list of documents/data not provided, as stated.
-- If the report has no such section, use an empty array \`[]\` — do not invent limitations.
-
-## Root cause — how to fill \`root_cause\`
-
-Each observation's detail panel in the report states a root cause (often shown as a label
-like "Root Cause: Process Design Deficiency"). Copy it as stated. It is almost always one of:
-- "Process Design Deficiency" — the process/policy itself was never properly designed
-- "Operating Ineffectiveness" — the process exists but wasn't followed correctly
-- "People Ineffectiveness" — a skills/awareness/staffing gap
-
-If the report uses different wording, copy it as written rather than forcing it into one of
-these three. If no root cause is stated for an observation, use an empty string \`""\`.
-
-## Repeated observations — how to fill \`is_repeated\` and \`pending_since_days\`
-
-Reports mark carried-over findings in one or both of these ways — check for either:
-1. The observation heading itself is labelled, e.g. "Observations – Sales Process -
-   **Repeated Observation**".
-2. A separate "Previous Audit Non-Compliance" section lists the same finding with a
-   "Pending Since (days)" figure.
-
-A couple of specifics that help:
-- Set \`is_repeated: true\` only when the report itself marks the observation as repeated —
-  never infer this from wording alone.
-- If a pending-days figure is given for that observation (in the Previous Audit
-  Non-Compliance table, or elsewhere), copy the number into \`pending_since_days\`. Otherwise
-  use \`0\`.
-- If unsure whether an observation is the same as a prior one, leave \`is_repeated: false\`
-  and add a note to \`clarifications_needed\` instead of guessing.
-
-## One last check before you send it back
-
-If you could just glance over these before replying, that'd be great:
-
-- The reply starts with \`{\` and ends with \`}\` — nothing else around it.
-- The observation count per area matches that area's \`total\`.
-- The risk numbers within each area add up to that area's \`total\`.
-- \`observation_count_by_risk\` matches the sum across all areas.
-- Every \`risk_level\` is Critical, High, Medium, or Low.
-- Every area in the Limitation of Scope table has a matching entry in \`limitations\`.
-- Every observation explicitly labelled "Repeated Observation" has \`is_repeated: true\`.
-- Every observation has a \`root_cause\` where the report states one.
-- Anything you're unsure about is noted in \`clarifications_needed\`.
-
-Thanks so much for your help with this!
-
----
-
-## Chunked method — for long reports (40+ pages or 30+ observations)
-
-If the AI truncates or stops midway, do it in stages instead:
-
-**Message 1:** "From the attached report, give me ONLY the \`report_metadata\` and \`audit_summary\`
-sections as JSON, using the structure above."
-
-**Message 2 onward:** "Now give me ONLY the \`areas\` entry for **[area name]** — every observation
-in that area, full text, using the structure above."
-
-Repeat for each area, then paste all the pieces together into one file in this order:
-\`report_metadata\`, \`audit_summary\`, \`areas\` (all areas inside one array), \`clarifications_needed\`.`;
 
 const P = {
   ink:"#0D1117", slate:"#1E293B", mid:"#475569", muted:"#94A3B8",
@@ -250,6 +61,26 @@ function readableError(err) {
 }
 
 // ── JSON validation ───────────────────────────────────────────────────────
+// ── LOCAL PDF CONVERTER (loaded on demand) ────────────────────────────────
+// lib/report-parser.js carries pdf.js and the parser (~1.5 MB), so it is
+// fetched the first time a staff member actually drops a PDF rather than on
+// every login. It is served from this repo, so no third-party service is
+// involved and the report is never uploaded — it is read in this browser tab.
+let converterPromise = null;
+function loadConverter() {
+  if (converterPromise) return converterPromise;
+  converterPromise = new Promise((ok, bad) => {
+    const s = document.createElement("script");
+    s.src = "lib/report-parser.js";
+    s.onload = () => window.NCLSConvert
+      ? ok(window.NCLSConvert)
+      : bad(new Error("Converter loaded but did not initialise."));
+    s.onerror = () => bad(new Error("Could not load lib/report-parser.js — check that the lib folder was uploaded alongside the portal."));
+    document.head.appendChild(s);
+  }).catch(e => { converterPromise = null; throw e; });
+  return converterPromise;
+}
+
 function validateJSON(json) {
   const errors = [], warnings = [];
   if (!json.report_metadata)  errors.push("Missing section: report_metadata");
@@ -497,27 +328,58 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
   const [result,setResult]=useState(null);
   const [answers,setAnswers]=useState({});
   const [step,setStep]=useState("form");
+  const [converting,setConverting]=useState("");
+  const [convError,setConvError]=useState("");
+  const [convertedFrom,setConvertedFrom]=useState("");
+  const [showManualJson,setShowManualJson]=useState(false);
 
   const myAssignments = assignments.filter(a=>a.client_name===clientName && a.status==="Active");
   const myUnits = units.filter(u=>u.client_name===clientName && String(u.assignment_id)===String(assignmentId) && u.status!=="Inactive");
 
-  const handleJson = useCallback(file=>{
-    setJsonFile(file); setResult(null); setJsonData(null); setMeta(null);
-    const r=new FileReader();
-    r.onload=e=>{
-      try{
-        const d=JSON.parse(e.target.result.trim()); setJsonData(d);
-        const m=d.report_metadata||{};
-        if(!fy && m.fy) setFy(m.fy);
-        setMeta({ periodFrom:m.audit_period_from||"", periodTo:m.audit_period_to||"",
-          auditors:Array.isArray(m.auditors)?m.auditors.join(", "):(m.auditors||""),
-          udin:m.udin||"", rating:m.overall_rating||"" });
-      }catch(err){ setResult({errors:[`Invalid JSON: ${err.message}`],warnings:[],clarifications:[]}); }
-    };
-    r.readAsText(file);
+  const applyJson = useCallback((d)=>{
+    setJsonData(d);
+    const m=d.report_metadata||{};
+    if(!fy && m.fy) setFy(m.fy);
+    setMeta({ periodFrom:m.audit_period_from||"", periodTo:m.audit_period_to||"",
+      auditors:Array.isArray(m.auditors)?m.auditors.join(", "):(m.auditors||""),
+      udin:m.udin||"", rating:m.overall_rating||"" });
   },[fy]);
 
-  const canValidate = clientName&&assignmentId&&unitId&&fy&&jsonData&&reportFile;
+  // The report PDF is both the file the MD downloads and the source of the
+  // JSON, so it is dropped once and converted here in the browser.
+  const handleReport = useCallback(async file=>{
+    setReportFile(file); setResult(null); setJsonData(null); setMeta(null);
+    setConvError(""); setConvertedFrom(""); setJsonFile(null);
+    if(!file) return;
+    if(!/\.pdf$/i.test(file.name||"")){
+      setConvError("Automatic conversion needs a PDF. Export the PPTX to PDF, or upload a JSON file manually below.");
+      return;
+    }
+    try{
+      setConverting("Loading the converter…");
+      const C = await loadConverter();
+      const json = await C.convertPdf(file, setConverting);
+      setConverting("");
+      applyJson(json);
+      setConvertedFrom(file.name);
+    }catch(e){
+      setConverting("");
+      setConvError((e&&e.message)||"This PDF could not be read. It may be password-protected or a scan.");
+    }
+  },[applyJson]);
+
+  const handleJson = useCallback(file=>{
+    setJsonFile(file); setResult(null); setJsonData(null); setMeta(null);
+    setConvError(""); setConvertedFrom("");
+    const r=new FileReader();
+    r.onload=e=>{
+      try{ applyJson(JSON.parse(e.target.result.trim())); }
+      catch(err){ setResult({errors:[`Invalid JSON: ${err.message}`],warnings:[],clarifications:[]}); }
+    };
+    r.readAsText(file);
+  },[applyJson]);
+
+  const canValidate = clientName&&assignmentId&&unitId&&fy&&jsonData&&reportFile&&!converting;
 
   const runValidation=()=>{ setStep("validating");
     setTimeout(()=>{ setResult(validateJSON(jsonData)); setAnswers({}); setStep("validated"); },600);
@@ -616,13 +478,61 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
         <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
           <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:16,paddingBottom:12,borderBottom:`1px solid ${P.border}`,display:"flex",alignItems:"center",gap:8}}>
             <span style={{background:P.blue,color:"#fff",width:22,height:22,borderRadius:6,fontSize:11,fontWeight:900,display:"inline-flex",alignItems:"center",justifyContent:"center"}}>2</span>
-            Upload JSON
+            Audit Report
           </div>
-          <FileDropZone label="Structured JSON File" accept=".json" file={jsonFile} onFile={handleJson} required
-            hint="Generated by the staff prompt template via Claude / ChatGPT"/>
+          <FileDropZone label="Audit Report (PDF)" accept=".pdf" file={reportFile} onFile={handleReport} required tag="MD Download"
+            hint="Converted to JSON here in your browser. The file is not uploaded anywhere for conversion, and the same PDF is what the MD downloads."/>
+
+          {converting&&(
+            <div style={{marginTop:14,background:P.blueLt,border:`1px solid ${P.blueBd}`,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{fontWeight:800,color:P.blue,fontSize:13}}>Converting on this computer…</div>
+              <div style={{fontSize:12,color:P.blue,marginTop:2}}>{converting}</div>
+            </div>
+          )}
+
+          {convError&&(
+            <div style={{marginTop:14,background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{fontWeight:800,color:P.red,fontSize:13}}>⛔ Could not convert</div>
+              <div style={{fontSize:12,color:"#991B1B",marginTop:2}}>{convError}</div>
+            </div>
+          )}
+
+          {convertedFrom&&jsonData&&(()=>{
+            const obs=(jsonData.areas||[]).reduce((t,a)=>t+a.observations.length,0);
+            const idx=(jsonData.executive_index||[]).length;
+            const blocking=(jsonData.clarifications_needed||[]).filter(c=>c.blocking);
+            return blocking.length?(
+              <div style={{marginTop:14,background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{fontWeight:800,color:P.red,fontSize:13,marginBottom:6}}>⛔ Figures could not be verified — do not submit</div>
+                {blocking.map((c,i)=><div key={i} style={{fontSize:12,color:"#991B1B",marginBottom:4,paddingLeft:10,borderLeft:`2px solid ${P.red}`}}>• {c.question}</div>)}
+              </div>
+            ):(
+              <div style={{marginTop:14,background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:10,padding:"12px 14px"}}>
+                <div style={{fontWeight:800,color:P.green,fontSize:13}}>✅ Converted — {obs} observations</div>
+                <div style={{fontSize:12,color:"#166534",marginTop:2}}>
+                  Counted from the observation slides and matched against the {idx} listed in the report's own Executive Summary.
+                </div>
+              </div>
+            );
+          })()}
+
+          <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${P.border}`}}>
+            {!showManualJson?(
+              <button onClick={()=>setShowManualJson(true)} style={{background:"none",border:"none",color:P.blue,fontSize:12,fontWeight:700,cursor:"pointer",padding:0}}>
+                Upload a JSON file instead ↓
+              </button>
+            ):(
+              <>
+                <div style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:8}}>MANUAL JSON — ONLY IF CONVERSION FAILED</div>
+                <FileDropZone label="Structured JSON File" accept=".json" file={jsonFile} onFile={handleJson}
+                  hint="Use this for a corrected JSON, or a report the converter cannot read. The PDF above is still required for the MD download."/>
+              </>
+            )}
+          </div>
+
           {meta&&(
             <div style={{marginTop:16,paddingTop:16,borderTop:`1px solid ${P.border}`}}>
-              <div style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:10}}>📋 METADATA FROM JSON — AUTO-FILLED</div>
+              <div style={{fontSize:11,fontWeight:700,color:P.muted,letterSpacing:.5,marginBottom:10}}>📋 METADATA FROM REPORT — AUTO-FILLED</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                 <MetaField label="PERIOD FROM" value={fmtDate(meta.periodFrom)}/>
                 <MetaField label="PERIOD TO" value={fmtDate(meta.periodTo)}/>
@@ -640,14 +550,10 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
         <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
           <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:16,paddingBottom:12,borderBottom:`1px solid ${P.border}`,display:"flex",alignItems:"center",gap:8}}>
             <span style={{background:P.blue,color:"#fff",width:22,height:22,borderRadius:6,fontSize:11,fontWeight:900,display:"inline-flex",alignItems:"center",justifyContent:"center"}}>3</span>
-            Upload Files
+            Annexure
           </div>
-          <div style={{display:"flex",flexDirection:"column",gap:14}}>
-            <FileDropZone label="Audit Report" accept=".pdf,.pptx,.ppt" file={reportFile} onFile={setReportFile} required tag="MD Download"
-              hint="Original report PDF or PPTX — available for the MD to download from the dashboard"/>
-            <FileDropZone label="Annexure File" accept=".pdf,.xlsx,.xls,.csv" file={annexureFile} onFile={setAnnexureFile} tag="Optional"
-              hint="Skip if annexures are already part of the report PDF"/>
-          </div>
+          <FileDropZone label="Annexure File" accept=".pdf,.xlsx,.xls,.csv" file={annexureFile} onFile={setAnnexureFile} tag="Optional"
+            hint="Skip if annexures are already part of the report PDF"/>
         </div>
       </div>
 
@@ -659,9 +565,9 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
             {[
               {label:"Client, assignment & unit selected",done:!!clientName&&!!assignmentId&&!!unitId},
               {label:"Financial year selected",done:!!fy},
-              {label:"JSON uploaded & parsed",done:!!jsonData},
-              {label:"Metadata auto-filled",done:!!meta?.periodFrom},
-              {label:"Audit report uploaded",done:!!reportFile},
+              {label:"Audit report added",done:!!reportFile},
+              {label:"Converted & figures cross-checked",done:!!jsonData},
+              {label:"Metadata auto-filled",done:!!meta},
             ].map(it=>(
               <div key={it.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
                 <div style={{width:18,height:18,borderRadius:"50%",flexShrink:0,background:it.done?P.greenLt:P.bg,
@@ -720,54 +626,25 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
         </div>
 
         <div style={{background:P.white,borderRadius:14,border:`1px solid ${P.border}`,padding:"22px"}}>
-          <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${P.border}`}}>📖 How to prepare the JSON</div>
-          {["Click \"Copy Prompt\" below, then open Claude","Attach the report PDF or PPTX to your Claude chat",
-            "Paste the copied prompt and send it","Save the AI output as a .json file",
-            "Upload it here — the portal validates automatically"].map((t,i)=>(
+          <div style={{fontSize:13,fontWeight:800,color:P.slate,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${P.border}`}}>📖 How this works</div>
+          {["Select the client, assignment, unit and financial year",
+            "Drop the report PDF — it is converted on this computer",
+            "The observation count is checked against the report's own Executive Summary",
+            "Review anything flagged, then submit for approval"].map((t,i)=>(
             <div key={i} style={{display:"flex",gap:10,marginBottom:10,alignItems:"flex-start"}}>
               <div style={{width:22,height:22,background:P.blueLt,color:P.blue,borderRadius:6,fontSize:11,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>{i+1}</div>
               <span style={{fontSize:13,color:P.mid,lineHeight:1.5}}>{t}</span>
             </div>
           ))}
-          <PromptTools/>
+          <div style={{marginTop:6,paddingTop:16,borderTop:`1px solid ${P.border}`,background:P.greenLt,
+            border:`1px solid ${P.greenBd}`,borderRadius:10,padding:"12px 14px"}}>
+            <div style={{fontWeight:800,color:P.green,fontSize:12.5}}>🔒 The report stays on this computer</div>
+            <div style={{fontSize:11.5,color:"#166534",marginTop:3,lineHeight:1.5}}>
+              Conversion runs inside this browser tab. The report is only uploaded once you
+              submit for approval, and then only to our own Supabase storage.
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ── PROMPT TOOLS ──────────────────────────────────────────────────────────
-function PromptTools() {
-  const [copied, setCopied] = useState(false);
-  const copyPrompt = async () => {
-    try {
-      await navigator.clipboard.writeText(PROMPT_TEXT);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    } catch (e) {
-      const ta = document.createElement("textarea");
-      ta.value = PROMPT_TEXT; document.body.appendChild(ta); ta.select();
-      document.execCommand("copy"); document.body.removeChild(ta);
-      setCopied(true); setTimeout(() => setCopied(false), 2500);
-    }
-  };
-  return (
-    <div style={{marginTop:6, paddingTop:16, borderTop:`1px solid ${P.border}`, display:"flex", flexDirection:"column", gap:10}}>
-      <button onClick={copyPrompt} style={{
-        width:"100%", background: copied ? P.green : P.blue, color:"#fff", border:"none",
-        borderRadius:9, padding:"11px 0", fontWeight:700, fontSize:13, cursor:"pointer", transition:"background .15s"
-      }}>
-        {copied ? "✓ Copied — now paste it into Claude" : "📋 Copy Prompt"}
-      </button>
-      <a href="https://claude.ai/new" target="_blank" rel="noopener noreferrer" style={{
-        display:"block", textAlign:"center", width:"100%", background:P.white, color:P.blue,
-        border:`1.5px solid ${P.blueBd}`, borderRadius:9, padding:"10px 0", fontWeight:700, fontSize:13,
-        textDecoration:"none", boxSizing:"border-box"
-      }}>
-        Open Claude ↗
-      </a>
-      <div style={{fontSize:11, color:P.muted, lineHeight:1.5}}>
-        Claude reads PDFs directly, including scans and slide decks — attach the report first, then paste the prompt.
       </div>
     </div>
   );
