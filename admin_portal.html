@@ -1595,6 +1595,76 @@ async function downloadFile(path, showToast) {
   } catch(e) { showToast("Could not open file: "+e.message, "error"); }
 }
 
+// ── UNCHECKED VALIDATION FLAGS ───────────────────────────────────────────
+// The converter flags anything it could not read with confidence, and
+// anything where the detailed report disagrees with the Executive Summary.
+// The staff member may answer those or submit regardless, so the approver
+// needs to see what was left unanswered before publishing.
+function validationFlags(r) {
+  const j = r.report_json || {};
+  const items = j.clarifications_needed || [];
+  const answers = j._clarification_answers || {};
+  return items.map((c, i) => ({
+    question: c.question || "",
+    field: c.field || "",
+    extracted: c.extracted_value || "",
+    blocking: !!c.blocking,
+    answer: String(answers[i] || answers[String(i)] || "").trim(),
+  }));
+}
+function unansweredFlags(r) {
+  return validationFlags(r).filter(f => !f.answer);
+}
+
+function FlagsModal({ report, onClose }) {
+  const flags = validationFlags(report);
+  const open = flags.filter(f => !f.answer);
+  const done = flags.filter(f => f.answer);
+  return (
+    <Modal title={`Validation flags — ${report.ClientName} / ${report.UnitName}`} onClose={onClose} wide>
+      <div style={{fontSize:12.5,color:P.mid,marginBottom:14,lineHeight:1.55}}>
+        All figures in the dashboard are taken from the detailed report. These are the
+        points the converter could not read with confidence, or where the detailed
+        report disagreed with the Executive Summary.
+      </div>
+      {open.length>0&&(
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:11,fontWeight:800,color:P.red,letterSpacing:.5,marginBottom:8}}>
+            NOT CHECKED BY STAFF ({open.length})
+          </div>
+          {open.map((f,i)=>(
+            <div key={i} style={{background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
+              <div style={{fontSize:12.5,color:"#991B1B",fontWeight:600}}>{f.question}</div>
+              {f.extracted&&<div style={{fontSize:11,color:P.mid,marginTop:4}}>Read from the report: {f.extracted}</div>}
+              <div style={{fontSize:10.5,color:P.muted,marginTop:3}}>{f.field}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {done.length>0&&(
+        <div>
+          <div style={{fontSize:11,fontWeight:800,color:P.green,letterSpacing:.5,marginBottom:8}}>
+            ANSWERED BY STAFF ({done.length})
+          </div>
+          {done.map((f,i)=>(
+            <div key={i} style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
+              <div style={{fontSize:12.5,color:"#166534",fontWeight:600}}>{f.question}</div>
+              <div style={{fontSize:12,color:P.slate,marginTop:4}}>Staff entered: <b>{f.answer}</b></div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!flags.length&&(
+        <div style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:8,padding:"12px 14px",
+          fontSize:12.5,color:"#166534"}}>
+          Nothing was flagged on this report. The observation counts taken from the
+          detailed report agreed with its Executive Summary.
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function ReportsSection({ user, reports, reload, showToast }) {
   const [selected, setSelected] = useState(null);
   const [extraEmail, setExtraEmail] = useState("");
@@ -1607,6 +1677,7 @@ function ReportsSection({ user, reports, reload, showToast }) {
   const [filterUnit, setFilterUnit] = useState("");
   const [filterFY, setFilterFY] = useState("");
   const [search, setSearch] = useState("");
+  const [flagsFor, setFlagsFor] = useState(null);
 
   const canApprove = !!user.perms?.approve_reports;
   const mine = r => !user.clients?.length || user.clients.includes(r.ClientName);
@@ -1700,6 +1771,14 @@ function ReportsSection({ user, reports, reload, showToast }) {
             <div style={{fontSize:11,color:"#92400E",marginTop:2}}>
               {pendingMine.map(r=>`${r.ClientName} — ${r.UnitName}`).join(" · ")}
             </div>
+            {(()=>{ const n = pendingMine.reduce((t,r)=>t+unansweredFlags(r).length,0);
+              const k = pendingMine.filter(r=>unansweredFlags(r).length).length;
+              return n ? (
+                <div style={{fontSize:11.5,color:P.red,marginTop:5,fontWeight:700}}>
+                  {n} point{n>1?"s":""} flagged by the converter on {k} of these {k>1?"were":"was"} not
+                  checked by the staff member — open the report to see them.
+                </div>
+              ) : null; })()}
           </div>
           <Btn size="sm" color="amber" onClick={()=>setFilterStatus("Draft")}>Review now</Btn>
         </div>
@@ -1724,6 +1803,8 @@ function ReportsSection({ user, reports, reload, showToast }) {
         <tbody>
           {filtered.map((r,i)=>{
             const awaiting = r.Status==="Draft" && mine(r);
+            const flags = validationFlags(r);
+            const open = flags.filter(f=>!f.answer);
             return (
             <tr key={r.id} style={{borderBottom:`1px solid ${P.border}`,background:awaiting?"#FFFDF5":(i%2===0?P.white:"#FAFAFA")}}>
               <TD center muted small>{i+1}</TD>
@@ -1731,6 +1812,13 @@ function ReportsSection({ user, reports, reload, showToast }) {
                 <div style={{fontWeight:700,color:P.slate,display:"flex",alignItems:"center",gap:6}}>
                   {r.ClientName}
                   {awaiting&&<span style={{background:P.amber,color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:9,fontWeight:800}}>NEEDS APPROVAL</span>}
+                  {open.length>0&&(
+                    <span onClick={()=>setFlagsFor(r)} title="Flagged by the converter and not answered by staff"
+                      style={{background:P.red,color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:9,
+                        fontWeight:800,cursor:"pointer"}}>
+                      {open.length} NOT CHECKED
+                    </span>
+                  )}
                 </div>
                 <div style={{fontSize:11,color:P.muted}}>{r.UnitName}</div>
               </td>
@@ -1746,6 +1834,8 @@ function ReportsSection({ user, reports, reload, showToast }) {
               </td>
               <td style={{padding:"10px 12px"}}><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
                 {(r.Status==="Draft"||r.Status==="Rejected") && <Btn size="sm" color="blue" outline onClick={()=>setPreviewId(r.id)}>👁️ Preview</Btn>}
+                {flags.length>0 && <Btn size="sm" color={open.length?"red":"gray"} outline onClick={()=>setFlagsFor(r)}>
+                  {open.length? `⚠ ${open.length} unchecked` : `${flags.length} flags`}</Btn>}
                 {canApprove && r.Status==="Draft" && <Btn size="sm" color="green" onClick={()=>approve(r)}>Approve & Publish</Btn>}
                 {canApprove && r.Status==="Draft" && <Btn size="sm" color="red" outline onClick={()=>{setRejecting(r);setReason("");}}>Reject</Btn>}
                 {canApprove && r.Status==="Rejected" && <Btn size="sm" color="green" onClick={()=>approve(r)}>Approve anyway</Btn>}
@@ -1803,6 +1893,8 @@ function ReportsSection({ user, reports, reload, showToast }) {
       {previewId && (
         <DashboardPreview reportId={previewId} onClose={()=>setPreviewId(null)} showToast={showToast}/>
       )}
+
+      {flagsFor && <FlagsModal report={flagsFor} onClose={()=>setFlagsFor(null)}/>}
     </Card>
   );
 }

@@ -600,12 +600,20 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
               )}
               {result.clarifications.length>0&&(
                 <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
-                  <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:10}}>🤖 {result.clarifications.length} item{result.clarifications.length>1?"s":""} flagged by AI</div>
+                  <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:4}}>
+                    {result.clarifications.length} point{result.clarifications.length>1?"s":""} to check
+                  </div>
+                  <div style={{fontSize:11.5,color:"#92400E",marginBottom:10,lineHeight:1.5}}>
+                    Every figure comes from the detailed report. These are the points the
+                    converter could not read with confidence, or where the detailed report
+                    disagreed with the Executive Summary. Anything you leave blank is passed
+                    on to the approver as unchecked.
+                  </div>
                   {result.clarifications.map((c,i)=>(
                     <div key={i} style={{background:"#fff",borderRadius:8,padding:"10px 12px",marginBottom:8,border:`1px solid ${P.amberBd}`}}>
                       <div style={{fontSize:11,fontWeight:700,color:P.amber,marginBottom:4}}>FIELD: {c.field}</div>
                       <div style={{fontSize:12,color:"#78350F",marginBottom:6}}>{c.question}</div>
-                      <input placeholder={`AI value: ${c.extracted_value} — type correction or leave blank`}
+                      <input placeholder={c.extracted_value ? `Read from report: ${c.extracted_value} — correct it or leave blank` : "Type the correct value, or leave blank"}
                         value={answers[i]||""} onChange={e=>setAnswers(a=>({...a,[i]:e.target.value}))}
                         style={{width:"100%",border:`1px solid ${answers[i]?P.green:P.amberBd}`,borderRadius:7,padding:"7px 10px",fontSize:12,outline:"none"}}/>
                     </div>
@@ -618,6 +626,16 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                     <div style={{fontWeight:800,color:P.green,fontSize:13}}>✅ JSON validated</div>
                     <div style={{fontSize:12,color:"#166534",marginTop:2}}>Submitting sends this for approval — it won't be visible to the client until approved.</div>
                   </div>
+                  {(()=>{
+                    const n = result.clarifications.filter((c,i)=>!String(answers[i]||"").trim()).length;
+                    return n ? (
+                      <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:8,
+                        padding:"10px 12px",marginBottom:10,fontSize:12,color:"#92400E"}}>
+                        {n} point{n>1?"s":""} still unchecked. You can submit anyway — the approver
+                        will see them marked as not checked.
+                      </div>
+                    ) : null;
+                  })()}
                   <Btn onClick={submit} color="green" full size="lg">Submit for Approval →</Btn>
                 </>
               )}
