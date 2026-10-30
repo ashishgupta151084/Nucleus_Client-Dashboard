@@ -327,6 +327,7 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
   const [meta,setMeta]=useState(null);
   const [result,setResult]=useState(null);
   const [answers,setAnswers]=useState({});
+  const [bypassed,setBypassed]=useState({});
   const [step,setStep]=useState("form");
   const [converting,setConverting]=useState("");
   const [convError,setConvError]=useState("");
@@ -414,7 +415,8 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
         uploaded_by: user.email,
         period: meta ? `${meta.periodFrom||""}${meta.periodFrom&&meta.periodTo?" – ":""}${meta.periodTo||""}` : "",
         udin: meta?.udin || "",
-        report_json: { ...jsonData, _clarification_answers: answers },
+        report_json: { ...jsonData, _clarification_answers: answers,
+                       _clarification_bypassed: bypassed },
         report_file: reportPath,
         annexure_file: annexPath,
       };
@@ -609,15 +611,31 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                     disagreed with the Executive Summary. Anything you leave blank is passed
                     on to the approver as unchecked.
                   </div>
-                  {result.clarifications.map((c,i)=>(
-                    <div key={i} style={{background:"#fff",borderRadius:8,padding:"10px 12px",marginBottom:8,border:`1px solid ${P.amberBd}`}}>
-                      <div style={{fontSize:11,fontWeight:700,color:P.amber,marginBottom:4}}>FIELD: {c.field}</div>
-                      <div style={{fontSize:12,color:"#78350F",marginBottom:6}}>{c.question}</div>
-                      <input placeholder={c.extracted_value ? `Read from report: ${c.extracted_value} — correct it or leave blank` : "Type the correct value, or leave blank"}
-                        value={answers[i]||""} onChange={e=>setAnswers(a=>({...a,[i]:e.target.value}))}
-                        style={{width:"100%",border:`1px solid ${answers[i]?P.green:P.amberBd}`,borderRadius:7,padding:"7px 10px",fontSize:12,outline:"none"}}/>
-                    </div>
-                  ))}
+                  {result.clarifications.map((c,i)=>{
+                    const skipped=!!bypassed[i], answered=!!String(answers[i]||"").trim();
+                    return (
+                    <div key={i} style={{background:skipped?"#F8FAFC":"#fff",borderRadius:8,padding:"10px 12px",
+                      marginBottom:8,border:`1px solid ${skipped?P.border:P.amberBd}`,opacity:skipped?.75:1}}>
+                      <div style={{fontSize:11,fontWeight:700,color:skipped?P.muted:P.amber,marginBottom:4}}>FIELD: {c.field}</div>
+                      <div style={{fontSize:12,color:skipped?P.mid:"#78350F",marginBottom:6}}>{c.question}</div>
+                      {c.extracted_value&&<div style={{fontSize:11,color:P.muted,marginBottom:6}}>In the report: {c.extracted_value}</div>}
+                      {!skipped&&(
+                        <input placeholder={c.extracted_value ? "Type the correct value" : "Type the correct value"}
+                          value={answers[i]||""} onChange={e=>setAnswers(a=>({...a,[i]:e.target.value}))}
+                          style={{width:"100%",border:`1px solid ${answered?P.green:P.amberBd}`,borderRadius:7,padding:"7px 10px",fontSize:12,outline:"none"}}/>
+                      )}
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginTop:7}}>
+                        <button onClick={()=>setBypassed(b=>({...b,[i]:!b[i]}))} style={{
+                          background:"none",border:`1px solid ${skipped?P.amber:P.border}`,color:skipped?P.amber:P.mid,
+                          borderRadius:6,padding:"4px 9px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+                          {skipped?"↩ Undo bypass":"Bypass this"}
+                        </button>
+                        {skipped&&<span style={{fontSize:11,color:P.amber,fontWeight:600}}>
+                          Bypassed — the approver will be told you skipped this.</span>}
+                        {!skipped&&answered&&<span style={{fontSize:11,color:P.green,fontWeight:600}}>✓ Answered</span>}
+                      </div>
+                    </div>);
+                  })}
                 </div>
               )}
               {!result.errors.length&&(
@@ -627,14 +645,19 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                     <div style={{fontSize:12,color:"#166534",marginTop:2}}>Submitting sends this for approval — it won't be visible to the client until approved.</div>
                   </div>
                   {(()=>{
-                    const n = result.clarifications.filter((c,i)=>!String(answers[i]||"").trim()).length;
-                    return n ? (
+                    const cl = result.clarifications;
+                    const skip = cl.filter((c,i)=>bypassed[i]).length;
+                    const open = cl.filter((c,i)=>!bypassed[i]&&!String(answers[i]||"").trim()).length;
+                    if (!skip && !open) return null;
+                    return (
                       <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:8,
-                        padding:"10px 12px",marginBottom:10,fontSize:12,color:"#92400E"}}>
-                        {n} point{n>1?"s":""} still unchecked. You can submit anyway — the approver
-                        will see them marked as not checked.
+                        padding:"10px 12px",marginBottom:10,fontSize:12,color:"#92400E",lineHeight:1.5}}>
+                        {open>0&&<div>{open} point{open>1?"s":""} not checked.</div>}
+                        {skip>0&&<div>{skip} point{skip>1?"s":""} bypassed.</div>}
+                        You can submit anyway — the approver is shown exactly which were bypassed
+                        and which were left unchecked.
                       </div>
-                    ) : null;
+                    );
                   })()}
                   <Btn onClick={submit} color="green" full size="lg">Submit for Approval →</Btn>
                 </>

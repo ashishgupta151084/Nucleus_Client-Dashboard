@@ -1604,22 +1604,35 @@ function validationFlags(r) {
   const j = r.report_json || {};
   const items = j.clarifications_needed || [];
   const answers = j._clarification_answers || {};
-  return items.map((c, i) => ({
-    question: c.question || "",
-    field: c.field || "",
-    extracted: c.extracted_value || "",
-    blocking: !!c.blocking,
-    answer: String(answers[i] || answers[String(i)] || "").trim(),
-  }));
+  const skipped = j._clarification_bypassed || {};
+  return items.map((c, i) => {
+    const answer = String(answers[i] || answers[String(i)] || "").trim();
+    const bypassed = !!(skipped[i] || skipped[String(i)]);
+    return {
+      question: c.question || "",
+      field: c.field || "",
+      extracted: c.extracted_value || "",
+      blocking: !!c.blocking,
+      answer,
+      bypassed,
+      // bypassed = the staff member saw it and chose to skip it
+      // open      = never looked at
+      status: bypassed ? "bypassed" : (answer ? "answered" : "open"),
+    };
+  });
 }
 function unansweredFlags(r) {
-  return validationFlags(r).filter(f => !f.answer);
+  return validationFlags(r).filter(f => f.status === "open");
+}
+function bypassedFlags(r) {
+  return validationFlags(r).filter(f => f.status === "bypassed");
 }
 
 function FlagsModal({ report, onClose }) {
   const flags = validationFlags(report);
-  const open = flags.filter(f => !f.answer);
-  const done = flags.filter(f => f.answer);
+  const open = flags.filter(f => f.status === "open");
+  const skip = flags.filter(f => f.status === "bypassed");
+  const done = flags.filter(f => f.status === "answered");
   return (
     <Modal title={`Validation flags — ${report.ClientName} / ${report.UnitName}`} onClose={onClose} wide>
       <div style={{fontSize:12.5,color:P.mid,marginBottom:14,lineHeight:1.55}}>
@@ -1635,6 +1648,23 @@ function FlagsModal({ report, onClose }) {
           {open.map((f,i)=>(
             <div key={i} style={{background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
               <div style={{fontSize:12.5,color:"#991B1B",fontWeight:600}}>{f.question}</div>
+              {f.extracted&&<div style={{fontSize:11,color:P.mid,marginTop:4}}>Read from the report: {f.extracted}</div>}
+              <div style={{fontSize:10.5,color:P.muted,marginTop:3}}>{f.field}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {skip.length>0&&(
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:11,fontWeight:800,color:P.amber,letterSpacing:.5,marginBottom:8}}>
+            BYPASSED BY STAFF ({skip.length})
+          </div>
+          <div style={{fontSize:11.5,color:P.mid,marginBottom:8}}>
+            The staff member saw these and chose to skip them without entering a correction.
+          </div>
+          {skip.map((f,i)=>(
+            <div key={i} style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
+              <div style={{fontSize:12.5,color:"#92400E",fontWeight:600}}>{f.question}</div>
               {f.extracted&&<div style={{fontSize:11,color:P.mid,marginTop:4}}>Read from the report: {f.extracted}</div>}
               <div style={{fontSize:10.5,color:P.muted,marginTop:3}}>{f.field}</div>
             </div>
@@ -1772,13 +1802,15 @@ function ReportsSection({ user, reports, reload, showToast }) {
               {pendingMine.map(r=>`${r.ClientName} — ${r.UnitName}`).join(" · ")}
             </div>
             {(()=>{ const n = pendingMine.reduce((t,r)=>t+unansweredFlags(r).length,0);
-              const k = pendingMine.filter(r=>unansweredFlags(r).length).length;
-              return n ? (
-                <div style={{fontSize:11.5,color:P.red,marginTop:5,fontWeight:700}}>
-                  {n} point{n>1?"s":""} flagged by the converter on {k} of these {k>1?"were":"was"} not
-                  checked by the staff member — open the report to see them.
+              const b = pendingMine.reduce((t,r)=>t+bypassedFlags(r).length,0);
+              if (!n && !b) return null;
+              return (
+                <div style={{fontSize:11.5,marginTop:5,fontWeight:700,lineHeight:1.5}}>
+                  {n>0&&<div style={{color:P.red}}>{n} flagged point{n>1?"s":""} not checked by staff.</div>}
+                  {b>0&&<div style={{color:P.amber}}>{b} flagged point{b>1?"s":""} bypassed by staff.</div>}
+                  <span style={{color:P.mid,fontWeight:500}}>Open the report to see them before approving.</span>
                 </div>
-              ) : null; })()}
+              ); })()}
           </div>
           <Btn size="sm" color="amber" onClick={()=>setFilterStatus("Draft")}>Review now</Btn>
         </div>
@@ -1804,7 +1836,8 @@ function ReportsSection({ user, reports, reload, showToast }) {
           {filtered.map((r,i)=>{
             const awaiting = r.Status==="Draft" && mine(r);
             const flags = validationFlags(r);
-            const open = flags.filter(f=>!f.answer);
+            const open = flags.filter(f=>f.status==="open");
+            const skip = flags.filter(f=>f.status==="bypassed");
             return (
             <tr key={r.id} style={{borderBottom:`1px solid ${P.border}`,background:awaiting?"#FFFDF5":(i%2===0?P.white:"#FAFAFA")}}>
               <TD center muted small>{i+1}</TD>
@@ -1813,10 +1846,17 @@ function ReportsSection({ user, reports, reload, showToast }) {
                   {r.ClientName}
                   {awaiting&&<span style={{background:P.amber,color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:9,fontWeight:800}}>NEEDS APPROVAL</span>}
                   {open.length>0&&(
-                    <span onClick={()=>setFlagsFor(r)} title="Flagged by the converter and not answered by staff"
+                    <span onClick={()=>setFlagsFor(r)} title="Flagged by the converter and never looked at"
                       style={{background:P.red,color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:9,
                         fontWeight:800,cursor:"pointer"}}>
                       {open.length} NOT CHECKED
+                    </span>
+                  )}
+                  {skip.length>0&&(
+                    <span onClick={()=>setFlagsFor(r)} title="Staff saw these and chose to bypass them"
+                      style={{background:P.amber,color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:9,
+                        fontWeight:800,cursor:"pointer"}}>
+                      {skip.length} BYPASSED
                     </span>
                   )}
                 </div>
@@ -1834,8 +1874,8 @@ function ReportsSection({ user, reports, reload, showToast }) {
               </td>
               <td style={{padding:"10px 12px"}}><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
                 {(r.Status==="Draft"||r.Status==="Rejected") && <Btn size="sm" color="blue" outline onClick={()=>setPreviewId(r.id)}>👁️ Preview</Btn>}
-                {flags.length>0 && <Btn size="sm" color={open.length?"red":"gray"} outline onClick={()=>setFlagsFor(r)}>
-                  {open.length? `⚠ ${open.length} unchecked` : `${flags.length} flags`}</Btn>}
+                {flags.length>0 && <Btn size="sm" color={open.length?"red":(skip.length?"amber":"gray")} outline onClick={()=>setFlagsFor(r)}>
+                  {open.length? `⚠ ${open.length} unchecked` : (skip.length? `⚠ ${skip.length} bypassed` : `${flags.length} flags`)}</Btn>}
                 {canApprove && r.Status==="Draft" && <Btn size="sm" color="green" onClick={()=>approve(r)}>Approve & Publish</Btn>}
                 {canApprove && r.Status==="Draft" && <Btn size="sm" color="red" outline onClick={()=>{setRejecting(r);setReason("");}}>Reject</Btn>}
                 {canApprove && r.Status==="Rejected" && <Btn size="sm" color="green" onClick={()=>approve(r)}>Approve anyway</Btn>}
