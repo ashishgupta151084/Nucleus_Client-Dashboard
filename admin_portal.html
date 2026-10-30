@@ -1602,7 +1602,10 @@ async function downloadFile(path, showToast) {
 // needs to see what was left unanswered before publishing.
 function validationFlags(r) {
   const j = r.report_json || {};
-  const items = j.clarifications_needed || [];
+  // _validation_items is the combined list the staff member actually saw
+  // (converter flags plus the portal's own warnings). Older reports only
+  // carry the converter's flags, so fall back to those.
+  const items = j._validation_items || j.clarifications_needed || [];
   const answers = j._clarification_answers || {};
   const skipped = j._clarification_bypassed || {};
   return items.map((c, i) => {

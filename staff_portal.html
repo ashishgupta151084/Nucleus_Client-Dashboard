@@ -89,8 +89,11 @@ function validateJSON(json) {
 
   if (json.report_metadata) {
     const m = json.report_metadata;
-    ["client_name","unit_name","fy","audit_period_from","audit_period_to"].forEach(k=>{
+    ["client_name","unit_name","fy"].forEach(k=>{
       if (!m[k]) errors.push(`report_metadata.${k} is missing`);
+    });
+    [["audit_period_from","audit period start"],["audit_period_to","audit period end"]].forEach(([k,label])=>{
+      if (!m[k]) warnings.push(`The ${label} could not be read from the report — please check it.`);
     });
     if (!m.udin)             warnings.push("UDIN not found in JSON — please verify");
     if (!m.overall_rating)   warnings.push("overall_rating not found in JSON");
@@ -158,8 +161,8 @@ function validateJSON(json) {
       if (!area.area_name) errors.push("An area is missing area_name");
       (area.observations||[]).forEach((obs,i)=>{
         if (!obs.title) warnings.push(`${area.area_name} obs #${i+1}: missing title`);
-        if (obs.is_repeated===true && !obs.pending_since_days)
-          warnings.push(`${area.area_name} obs #${i+1} "${obs.title}": marked repeated but no pending_since_days given`);
+        // A repeated observation is not necessarily still open, so it need
+        // not carry a pending-since figure.
         if (!obs.risk_level) errors.push(`${area.area_name} obs #${i+1}: missing risk_level`);
         else if (!["Critical","High","Medium","Low"].includes(obs.risk_level))
           errors.push(`${area.area_name} obs #${i+1}: invalid risk_level "${obs.risk_level}"`);
@@ -328,6 +331,13 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
   const [result,setResult]=useState(null);
   const [answers,setAnswers]=useState({});
   const [bypassed,setBypassed]=useState({});
+  // Converter flags and the portal's own warnings are shown as one list, so
+  // every point can be corrected or bypassed and all of them reach the
+  // approver. Indices into this list are what answers/bypassed are keyed on.
+  const allFlags = React.useMemo(()=>[
+    ...((result&&result.clarifications)||[]),
+    ...((result&&result.warnings)||[]).map(w=>({field:"validation", question:w})),
+  ],[result]);
   const [step,setStep]=useState("form");
   const [converting,setConverting]=useState("");
   const [convError,setConvError]=useState("");
@@ -415,7 +425,8 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
         uploaded_by: user.email,
         period: meta ? `${meta.periodFrom||""}${meta.periodFrom&&meta.periodTo?" – ":""}${meta.periodTo||""}` : "",
         udin: meta?.udin || "",
-        report_json: { ...jsonData, _clarification_answers: answers,
+        report_json: { ...jsonData, _validation_items: allFlags,
+                       _clarification_answers: answers,
                        _clarification_bypassed: bypassed },
         report_file: reportPath,
         annexure_file: annexPath,
@@ -594,16 +605,10 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                   <Btn size="sm" color="red" outline onClick={()=>{setJsonFile(null);setJsonData(null);setMeta(null);setResult(null);setStep("form");}}>← Re-upload corrected JSON</Btn>
                 </div>
               )}
-              {result.warnings.length>0&&(
-                <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
-                  <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:8}}>⚠️ {result.warnings.length} warning{result.warnings.length>1?"s":""}</div>
-                  {result.warnings.map((w,i)=><div key={i} style={{fontSize:12,color:"#92400E",marginBottom:4,paddingLeft:10,borderLeft:`2px solid ${P.amber}`}}>• {w}</div>)}
-                </div>
-              )}
-              {result.clarifications.length>0&&(
+              {allFlags.length>0&&(
                 <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
                   <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:4}}>
-                    {result.clarifications.length} point{result.clarifications.length>1?"s":""} to check
+                    {allFlags.length} point{allFlags.length>1?"s":""} to check
                   </div>
                   <div style={{fontSize:11.5,color:"#92400E",marginBottom:10,lineHeight:1.5}}>
                     Every figure comes from the detailed report. These are the points the
@@ -611,7 +616,7 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                     disagreed with the Executive Summary. Anything you leave blank is passed
                     on to the approver as unchecked.
                   </div>
-                  {result.clarifications.map((c,i)=>{
+                  {allFlags.map((c,i)=>{
                     const skipped=!!bypassed[i], answered=!!String(answers[i]||"").trim();
                     return (
                     <div key={i} style={{background:skipped?"#F8FAFC":"#fff",borderRadius:8,padding:"10px 12px",
@@ -645,7 +650,7 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                     <div style={{fontSize:12,color:"#166534",marginTop:2}}>Submitting sends this for approval — it won't be visible to the client until approved.</div>
                   </div>
                   {(()=>{
-                    const cl = result.clarifications;
+                    const cl = allFlags;
                     const skip = cl.filter((c,i)=>bypassed[i]).length;
                     const open = cl.filter((c,i)=>!bypassed[i]&&!String(answers[i]||"").trim()).length;
                     if (!skip && !open) return null;
