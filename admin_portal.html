@@ -1722,6 +1722,7 @@ function ReportsSection({ user, reports, reload, showToast }) {
   const [filterFY, setFilterFY] = useState("");
   const [search, setSearch] = useState("");
   const [flagsFor, setFlagsFor] = useState(null);
+  const [approving, setApproving] = useState(null);
 
   const canApprove = !!user.perms?.approve_reports;
   const mine = r => !user.clients?.length || user.clients.includes(r.ClientName);
@@ -1736,11 +1737,15 @@ function ReportsSection({ user, reports, reload, showToast }) {
     } catch(e) { showToast(e.message,"error"); }
   };
 
-  const approve = async r => {
+  const approve = async (r, confirmed) => {
+    if (!confirmed) {
+      const f = validationFlags(r).filter(x => x.status !== "answered");
+      if (f.length) { setApproving(r); return; }
+    }
     try {
       await sb.from("reports").update({ status:"Live", approved_by:user.email, approved_on:new Date().toISOString(), rejected_reason:null }).eq("id", r.id);
       await logAction("Approved & published report", user.email, `${r.ClientName} — ${r.UnitName} FY${r.FY}`, "Reports");
-      showToast("Report approved and published"); reload();
+      showToast("Report approved and published"); setApproving(null); reload();
     } catch(e) { showToast(e.message,"error"); }
   };
 
@@ -1949,6 +1954,44 @@ function ReportsSection({ user, reports, reload, showToast }) {
       )}
 
       {flagsFor && <FlagsModal report={flagsFor} onClose={()=>setFlagsFor(null)}/>}
+
+      {approving && (()=>{
+        const f = validationFlags(approving).filter(x=>x.status!=="answered");
+        const open = f.filter(x=>x.status==="open");
+        const skip = f.filter(x=>x.status==="bypassed");
+        const serious = f.filter(x=>x.severity==="serious").length;
+        return (
+        <Modal title="Before you publish this report" wide onClose={()=>setApproving(null)}>
+          <div style={{fontSize:13,color:P.mid,marginBottom:14,lineHeight:1.55}}>
+            <b>{approving.ClientName} — {approving.UnitName}</b> was submitted with {f.length} point
+            {f.length>1?"s":""} the staff member did not resolve
+            {serious>0 && <span style={{color:P.red,fontWeight:700}}> ({serious} serious)</span>}.
+            Publishing makes it visible to the client.
+          </div>
+          {[["Bypassed by the staff member", skip, P.amber, P.amberLt, P.amberBd],
+            ["Left unchecked", open, P.red, P.redLt, P.redBd]].map(([label,list,c,bg,bd])=>(
+            list.length ? (
+              <div key={label} style={{marginBottom:14}}>
+                <div style={{fontSize:11,fontWeight:800,color:c,letterSpacing:.5,marginBottom:8}}>
+                  {label.toUpperCase()} ({list.length})
+                </div>
+                {list.map((x,i)=>(
+                  <div key={i} style={{background:bg,border:`1px solid ${bd}`,borderRadius:8,
+                    padding:"9px 11px",marginBottom:6,fontSize:12.5,color:P.slate}}>
+                    {x.severity==="serious"&&<span style={{background:P.red,color:"#fff",borderRadius:3,
+                      padding:"1px 5px",fontSize:9,fontWeight:800,marginRight:6}}>SERIOUS</span>}
+                    {x.question}
+                  </div>
+                ))}
+              </div>
+            ) : null
+          ))}
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:18}}>
+            <Btn color="gray" onClick={()=>setApproving(null)}>Cancel</Btn>
+            <Btn color="green" onClick={()=>approve(approving, true)}>Publish anyway</Btn>
+          </div>
+        </Modal>);
+      })()}
     </Card>
   );
 }
