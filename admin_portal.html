@@ -1616,6 +1616,7 @@ function validationFlags(r) {
       field: c.field || "",
       extracted: c.extracted_value || "",
       blocking: !!c.blocking,
+    severity: c.severity === "error" || !!c.blocking ? "serious" : "normal",
       answer,
       bypassed,
       // bypassed = the staff member saw it and chose to skip it
@@ -1650,7 +1651,11 @@ function FlagsModal({ report, onClose }) {
           </div>
           {open.map((f,i)=>(
             <div key={i} style={{background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
-              <div style={{fontSize:12.5,color:"#991B1B",fontWeight:600}}>{f.question}</div>
+              <div style={{fontSize:12.5,color:"#991B1B",fontWeight:600}}>
+                {f.severity==="serious"&&<span style={{background:P.red,color:"#fff",borderRadius:3,
+                  padding:"1px 5px",fontSize:9,fontWeight:800,marginRight:6}}>SERIOUS</span>}
+                {f.question}
+              </div>
               {f.extracted&&<div style={{fontSize:11,color:P.mid,marginTop:4}}>Read from the report: {f.extracted}</div>}
               <div style={{fontSize:10.5,color:P.muted,marginTop:3}}>{f.field}</div>
             </div>
@@ -1667,7 +1672,10 @@ function FlagsModal({ report, onClose }) {
           </div>
           {skip.map((f,i)=>(
             <div key={i} style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
-              <div style={{fontSize:12.5,color:"#92400E",fontWeight:600}}>{f.question}</div>
+              <div style={{fontSize:12.5,color:"#92400E",fontWeight:600}}>
+                {f.severity==="serious"&&<span style={{background:P.red,color:"#fff",borderRadius:3,padding:"1px 5px",fontSize:9,fontWeight:800,marginRight:6}}>SERIOUS</span>}
+                {f.question}
+              </div>
               {f.extracted&&<div style={{fontSize:11,color:P.mid,marginTop:4}}>Read from the report: {f.extracted}</div>}
               <div style={{fontSize:10.5,color:P.muted,marginTop:3}}>{f.field}</div>
             </div>
@@ -1681,7 +1689,10 @@ function FlagsModal({ report, onClose }) {
           </div>
           {done.map((f,i)=>(
             <div key={i} style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:8,padding:"10px 12px",marginBottom:8}}>
-              <div style={{fontSize:12.5,color:"#166534",fontWeight:600}}>{f.question}</div>
+              <div style={{fontSize:12.5,color:"#166534",fontWeight:600}}>
+                {f.severity==="serious"&&<span style={{background:P.red,color:"#fff",borderRadius:3,padding:"1px 5px",fontSize:9,fontWeight:800,marginRight:6}}>SERIOUS</span>}
+                {f.question}
+              </div>
               <div style={{fontSize:12,color:P.slate,marginTop:4}}>Staff entered: <b>{f.answer}</b></div>
             </div>
           ))}
@@ -1852,7 +1863,7 @@ function ReportsSection({ user, reports, reload, showToast }) {
                     <span onClick={()=>setFlagsFor(r)} title="Flagged by the converter and never looked at"
                       style={{background:P.red,color:"#fff",borderRadius:4,padding:"1px 6px",fontSize:9,
                         fontWeight:800,cursor:"pointer"}}>
-                      {open.length} NOT CHECKED
+                      {open.length} NOT CHECKED{open.filter(f=>f.severity==="serious").length>0?" ⚠":""}
                     </span>
                   )}
                   {skip.length>0&&(

@@ -335,6 +335,7 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
   // every point can be corrected or bypassed and all of them reach the
   // approver. Indices into this list are what answers/bypassed are keyed on.
   const allFlags = React.useMemo(()=>[
+    ...((result&&result.errors)||[]).map(e=>({field:"validation", question:e, severity:"error"})),
     ...((result&&result.clarifications)||[]),
     ...((result&&result.warnings)||[]).map(w=>({field:"validation", question:w})),
   ],[result]);
@@ -598,31 +599,34 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
 
           {step==="validated"&&result&&(
             <div>
-              {result.errors.length>0&&(
-                <div style={{background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
-                  <div style={{fontWeight:800,color:P.red,fontSize:13,marginBottom:8}}>⛔ {result.errors.length} error{result.errors.length>1?"s":""} — cannot submit</div>
-                  {result.errors.map((e,i)=><div key={i} style={{fontSize:12,color:"#991B1B",marginBottom:4,paddingLeft:10,borderLeft:`2px solid ${P.red}`}}>• {e}</div>)}
-                  <Btn size="sm" color="red" outline onClick={()=>{setJsonFile(null);setJsonData(null);setMeta(null);setResult(null);setStep("form");}}>← Re-upload corrected JSON</Btn>
-                </div>
-              )}
               {allFlags.length>0&&(
                 <div style={{background:P.amberLt,border:`1px solid ${P.amberBd}`,borderRadius:10,padding:"14px 16px",marginBottom:12}}>
-                  <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:4}}>
-                    {allFlags.length} point{allFlags.length>1?"s":""} to check
-                  </div>
+                  {(()=>{ const errs = allFlags.filter(c=>c.severity==="error").length;
+                    return (
+                      <div style={{fontWeight:800,color:P.amber,fontSize:13,marginBottom:4}}>
+                        {allFlags.length} point{allFlags.length>1?"s":""} to check
+                        {errs>0 && <span style={{color:P.red}}> — {errs} serious</span>}
+                      </div>
+                    ); })()}
                   <div style={{fontSize:11.5,color:"#92400E",marginBottom:10,lineHeight:1.5}}>
                     Every figure comes from the detailed report. These are the points the
                     converter could not read with confidence, or where the detailed report
-                    disagreed with the Executive Summary. Anything you leave blank is passed
-                    on to the approver as unchecked.
+                    disagreed with the Executive Summary. You can correct a point, bypass it,
+                    or leave it — none of them stop you submitting, and the approver is shown
+                    exactly which were corrected, bypassed or left unchecked.
                   </div>
                   {allFlags.map((c,i)=>{
                     const skipped=!!bypassed[i], answered=!!String(answers[i]||"").trim();
+                    const bad=c.severity==="error";
+                    const edge=skipped?P.border:(bad?P.redBd:P.amberBd);
+                    const tone=skipped?P.muted:(bad?P.red:P.amber);
                     return (
                     <div key={i} style={{background:skipped?"#F8FAFC":"#fff",borderRadius:8,padding:"10px 12px",
-                      marginBottom:8,border:`1px solid ${skipped?P.border:P.amberBd}`,opacity:skipped?.75:1}}>
-                      <div style={{fontSize:11,fontWeight:700,color:skipped?P.muted:P.amber,marginBottom:4}}>FIELD: {c.field}</div>
-                      <div style={{fontSize:12,color:skipped?P.mid:"#78350F",marginBottom:6}}>{c.question}</div>
+                      marginBottom:8,border:`1px solid ${edge}`,opacity:skipped?.75:1}}>
+                      <div style={{fontSize:11,fontWeight:700,color:tone,marginBottom:4}}>
+                        {bad?"SERIOUS":"FIELD"}: {c.field}
+                      </div>
+                      <div style={{fontSize:12,color:skipped?P.mid:(bad?"#991B1B":"#78350F"),marginBottom:6}}>{c.question}</div>
                       {c.extracted_value&&<div style={{fontSize:11,color:P.muted,marginBottom:6}}>In the report: {c.extracted_value}</div>}
                       {!skipped&&(
                         <input placeholder={c.extracted_value ? "Type the correct value" : "Type the correct value"}
@@ -643,12 +647,14 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                   })}
                 </div>
               )}
-              {!result.errors.length&&(
+              {(
                 <>
-                  <div style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12}}>
-                    <div style={{fontWeight:800,color:P.green,fontSize:13}}>✅ JSON validated</div>
-                    <div style={{fontSize:12,color:"#166534",marginTop:2}}>Submitting sends this for approval — it won't be visible to the client until approved.</div>
-                  </div>
+                  {!allFlags.length&&(
+                    <div style={{background:P.greenLt,border:`1px solid ${P.greenBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12}}>
+                      <div style={{fontWeight:800,color:P.green,fontSize:13}}>✅ Checks passed</div>
+                      <div style={{fontSize:12,color:"#166534",marginTop:2}}>Submitting sends this for approval — it won't be visible to the client until approved.</div>
+                    </div>
+                  )}
                   {(()=>{
                     const cl = allFlags;
                     const skip = cl.filter((c,i)=>bypassed[i]).length;
@@ -659,8 +665,12 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
                         padding:"10px 12px",marginBottom:10,fontSize:12,color:"#92400E",lineHeight:1.5}}>
                         {open>0&&<div>{open} point{open>1?"s":""} not checked.</div>}
                         {skip>0&&<div>{skip} point{skip>1?"s":""} bypassed.</div>}
-                        You can submit anyway — the approver is shown exactly which were bypassed
-                        and which were left unchecked.
+                        {(()=>{ const sv = cl.filter((c,i)=>c.severity==="error"&&(bypassed[i]||!String(answers[i]||"").trim())).length;
+                          return sv>0 ? <div style={{color:P.red,fontWeight:700}}>
+                            {sv} of these {sv>1?"are":"is"} a serious point — it will be marked for the approver.
+                          </div> : null; })()}
+                        You can submit either way — the approver is shown exactly which were
+                        corrected, which were bypassed and which were left unchecked.
                       </div>
                     );
                   })()}
