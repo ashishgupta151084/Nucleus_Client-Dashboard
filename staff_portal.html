@@ -81,6 +81,23 @@ function loadConverter() {
   return converterPromise;
 }
 
+// ── SELECTION vs REPORT ───────────────────────────────────────────────────
+// The client, unit and year are chosen from dropdowns, but the report itself
+// states all three on its cover. If they disagree, a report is about to be
+// filed against the wrong client — and would then be shown to the wrong MD.
+// Names are compared loosely: the master may say "SI Interpack Pvt Ltd" where
+// the cover says "SI Interpack Private Limited", and "Chakan" vs "Chakan Unit".
+const NAME_NOISE = ["pvt","private","ltd","limited","llp","inc","co","company",
+                    "unit","plant","works","division","the","and"];
+function nameKey(s) {
+  const w = String(s || "").toLowerCase().replace(/&/g, " and ").match(/[a-z0-9]+/g) || [];
+  return w.filter(x => !NAME_NOISE.includes(x)).join("");
+}
+function fyKey(s) {
+  const m = String(s || "").match(/(\d{4})\s*[-/]\s*(\d{2,4})/);
+  return m ? m[1] + "-" + m[2].slice(-2) : String(s || "").trim();
+}
+
 function validateJSON(json) {
   const errors = [], warnings = [];
   if (!json.report_metadata)  errors.push("Missing section: report_metadata");
@@ -331,14 +348,6 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
   const [result,setResult]=useState(null);
   const [answers,setAnswers]=useState({});
   const [bypassed,setBypassed]=useState({});
-  // Converter flags and the portal's own warnings are shown as one list, so
-  // every point can be corrected or bypassed and all of them reach the
-  // approver. Indices into this list are what answers/bypassed are keyed on.
-  const allFlags = React.useMemo(()=>[
-    ...((result&&result.errors)||[]).map(e=>({field:"validation", question:e, severity:"error"})),
-    ...((result&&result.clarifications)||[]),
-    ...((result&&result.warnings)||[]).map(w=>({field:"validation", question:w})),
-  ],[result]);
   const [step,setStep]=useState("form");
   const [converting,setConverting]=useState("");
   const [convError,setConvError]=useState("");
@@ -347,6 +356,38 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
 
   const myAssignments = assignments.filter(a=>a.client_name===clientName && a.status==="Active");
   const myUnits = units.filter(u=>u.client_name===clientName && String(u.assignment_id)===String(assignmentId) && u.status!=="Inactive");
+
+  // Does what was selected match what the report says?
+  const selectionIssues = React.useMemo(()=>{
+    if(!jsonData) return [];
+    const m = jsonData.report_metadata || {};
+    const unitName = (myUnits.find(u=>String(u.id)===String(unitId))||{}).unit_name || "";
+    const out = [];
+    const cmp = (picked, stated, label) => {
+      if(!picked || !stated) return;
+      if(nameKey(picked) !== nameKey(stated))
+        out.push({ field:`selection.${label}`, severity:"error",
+          question:`You selected ${label} "${picked}", but the report says "${stated}". `
+                 + `Check that this is the right report before submitting.` });
+    };
+    cmp(clientName, m.client_name, "client");
+    cmp(unitName, m.unit_name, "unit");
+    if(fy && m.fy && fyKey(fy) !== fyKey(m.fy))
+      out.push({ field:"selection.fy", severity:"error",
+        question:`You selected financial year "${fy}", but the report says "${m.fy}". `
+               + `Check that this is the right report before submitting.` });
+    return out;
+  },[jsonData, clientName, unitId, fy, myUnits]);
+
+  // Converter flags and the portal's own warnings are shown as one list, so
+  // every point can be corrected or bypassed and all of them reach the
+  // approver. Indices into this list are what answers/bypassed are keyed on.
+  const allFlags = React.useMemo(()=>[
+    ...selectionIssues,
+    ...((result&&result.errors)||[]).map(e=>({field:"validation", question:e, severity:"error"})),
+    ...((result&&result.clarifications)||[]),
+    ...((result&&result.warnings)||[]).map(w=>({field:"validation", question:w})),
+  ],[result, selectionIssues]);
 
   const applyJson = useCallback((d)=>{
     setJsonData(d);
@@ -530,6 +571,21 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
             );
           })()}
 
+          {selectionIssues.length>0&&(
+            <div style={{marginTop:14,background:P.redLt,border:`1px solid ${P.redBd}`,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{fontWeight:800,color:P.red,fontSize:13,marginBottom:6}}>
+                ⛔ This may be the wrong report
+              </div>
+              {selectionIssues.map((s,i)=>(
+                <div key={i} style={{fontSize:12,color:"#991B1B",marginBottom:4,paddingLeft:10,
+                  borderLeft:`2px solid ${P.red}`}}>{s.question}</div>
+              ))}
+              <div style={{fontSize:11.5,color:"#991B1B",marginTop:6}}>
+                Correct the selection above, or carry on — the approver is told either way.
+              </div>
+            </div>
+          )}
+
           <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${P.border}`}}>
             {!showManualJson?(
               <button onClick={()=>setShowManualJson(true)} style={{background:"none",border:"none",color:P.blue,fontSize:12,fontWeight:700,cursor:"pointer",padding:0}}>
@@ -581,6 +637,7 @@ function UploadForm({ user, clients, assignments, units, onUploaded, showToast }
               {label:"Financial year selected",done:!!fy},
               {label:"Audit report added",done:!!reportFile},
               {label:"Converted & figures cross-checked",done:!!jsonData},
+              {label:"Selection matches the report",done:!!jsonData&&!selectionIssues.length},
               {label:"Metadata auto-filled",done:!!meta},
             ].map(it=>(
               <div key={it.label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
